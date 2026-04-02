@@ -12,6 +12,9 @@ Fixed REPA version:
 import os
 import argparse
 import logging
+import shutil
+import subprocess
+import sys
 from glob import glob
 from time import time
 from copy import deepcopy
@@ -215,6 +218,156 @@ def extract_dino_patch_tokens(dino_model, x):
     return tokens
 
 
+def load_vae(args, device, rank, logger):
+    """
+    Load the SD VAE once on rank 0, then reuse the local cache on all ranks.
+    This avoids concurrent remote fetches from multiple DDP workers.
+    """
+    vae_source = args.vae_model_dir or f"stabilityai/sd-vae-ft-{args.vae}"
+    is_local_dir = os.path.isdir(vae_source)
+
+    if rank == 0 and not is_local_dir:
+        logger.info(f"Prefetching VAE weights from: {vae_source}")
+        prefetch_vae = AutoencoderKL.from_pretrained(vae_source)
+        del prefetch_vae
+
+    dist.barrier(device_ids=[device])
+
+    vae = AutoencoderKL.from_pretrained(
+        vae_source,
+        local_files_only=not is_local_dir,
+    ).to(device)
+    vae.eval()
+    requires_grad(vae, False)
+    return vae
+
+
+def get_alignment_weight(step, args):
+    """
+    Compute the effective alignment weight at the current training step.
+    """
+    if not args.repa:
+        return 0.0
+    if args.repa_schedule == "constant":
+        return args.repa_lambda
+    if args.repa_schedule == "linear":
+        if step >= args.repa_schedule_steps:
+            return 0.0
+        progress = step / max(1, args.repa_schedule_steps)
+        return args.repa_lambda * (1.0 - progress)
+    raise ValueError(f"Unsupported repa schedule: {args.repa_schedule}")
+
+
+@torch.no_grad()
+def evaluate_fid(
+    ema,
+    diffusion,
+    vae,
+    args,
+    device,
+    step,
+    logger,
+):
+    """
+    Generate class-conditional samples with EMA weights and compute FID
+    against a reference image directory via pytorch-fid.
+    """
+    if not args.fid_ref_dir:
+        logger.info("Skipping FID evaluation: --fid-ref-dir is not set.")
+        return None
+    if not os.path.isdir(args.fid_ref_dir):
+        logger.info(f"Skipping FID evaluation: reference dir not found: {args.fid_ref_dir}")
+        return None
+
+    eval_base_dir = getattr(args, "experiment_dir", args.results_dir)
+    eval_root = os.path.join(eval_base_dir, "fid_eval", f"step_{step:07d}")
+    sample_dir = os.path.join(eval_root, "samples")
+    os.makedirs(sample_dir, exist_ok=True)
+
+    ema.eval()
+    if args.model.endswith("/2") and args.image_size == 256:
+        logger.info(
+            f"Running FID evaluation at step={step} with "
+            f"{args.fid_num_samples} samples, batch_size={args.fid_batch_size}, "
+            f"sampling_steps={args.fid_sampling_steps}."
+        )
+
+    latent_size = args.image_size // 8
+    using_cfg = args.fid_cfg_scale > 1.0
+    sample_diffusion = create_diffusion(str(args.fid_sampling_steps))
+
+    total_saved = 0
+    while total_saved < args.fid_num_samples:
+        n = min(args.fid_batch_size, args.fid_num_samples - total_saved)
+        z = torch.randn(n, ema.in_channels, latent_size, latent_size, device=device)
+        y = torch.randint(0, args.num_classes, (n,), device=device)
+
+        if using_cfg:
+            z = torch.cat([z, z], 0)
+            y_null = torch.tensor([args.num_classes] * n, device=device)
+            y = torch.cat([y, y_null], 0)
+            model_kwargs = dict(y=y, cfg_scale=args.fid_cfg_scale)
+            sample_fn = ema.forward_with_cfg
+        else:
+            model_kwargs = dict(y=y)
+            sample_fn = ema.forward
+
+        samples = sample_diffusion.p_sample_loop(
+            sample_fn,
+            z.shape,
+            z,
+            clip_denoised=False,
+            model_kwargs=model_kwargs,
+            progress=False,
+            device=device,
+        )
+        if using_cfg:
+            samples, _ = samples.chunk(2, dim=0)
+
+        samples = vae.decode(samples / 0.18215).sample
+        samples = torch.clamp(127.5 * samples + 128.0, 0, 255)
+        samples = samples.permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+
+        for sample in samples:
+            Image.fromarray(sample).save(os.path.join(sample_dir, f"{total_saved:06d}.png"))
+            total_saved += 1
+
+    fid_device = f"cuda:{device}" if torch.cuda.is_available() else "cpu"
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytorch_fid",
+        sample_dir,
+        args.fid_ref_dir,
+        "--device",
+        fid_device,
+        "--batch-size",
+        str(args.fid_batch_size),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        logger.info(f"FID evaluation failed at step={step}.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+        return None
+
+    fid_value = None
+    for line in proc.stdout.splitlines():
+        if "FID:" in line:
+            try:
+                fid_value = float(line.split("FID:")[-1].strip())
+            except ValueError:
+                fid_value = None
+            break
+
+    if fid_value is None:
+        logger.info(f"FID evaluation finished but could not parse output.\nstdout:\n{proc.stdout}")
+    else:
+        logger.info(f"(step={step:07d}) FID: {fid_value:.4f}")
+
+    if not args.keep_fid_samples:
+        shutil.rmtree(eval_root, ignore_errors=True)
+    return fid_value
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -248,6 +401,7 @@ def main(args):
         if args.repa:
             experiment_name += f"-repa-lam{args.repa_lambda}"
         experiment_dir = f"{args.results_dir}/{experiment_name}"
+        args.experiment_dir = experiment_dir
         checkpoint_dir = f"{experiment_dir}/checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
@@ -270,9 +424,7 @@ def main(args):
     model = model.to(device)
     diffusion = create_diffusion(timestep_respacing="")
 
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    vae.eval()
-    requires_grad(vae, False)
+    vae = load_vae(args, device, rank, logger)
 
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -365,13 +517,19 @@ def main(args):
     running_loss_align = 0.0
     start_time = time()
 
-    logger.info(f"Training for {args.epochs} epochs...")
+    logger.info(
+        f"Training for up to {args.epochs} epochs "
+        f"(max_steps={args.max_steps}, repa_schedule={args.repa_schedule}, "
+        f"repa_schedule_steps={args.repa_schedule_steps})..."
+    )
 
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
 
         for images, y in loader:
+            current_step = train_steps
+            align_weight = get_alignment_weight(current_step, args)
             images = images.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
@@ -388,7 +546,7 @@ def main(args):
             # REPA alignment loss
             loss_align = torch.tensor(0.0, device=device)
 
-            if args.repa:
+            if args.repa and align_weight > 0:
                 # Teacher tokens from clean RGB image
                 x_dino = preprocess_for_dino(images)
                 with torch.inference_mode():
@@ -423,7 +581,7 @@ def main(args):
 
                 loss_align = cosine_align_loss(proj_tokens, dino_tokens)
 
-            loss = loss_diff + args.repa_lambda * loss_align
+            loss = loss_diff + align_weight * loss_align
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -467,6 +625,7 @@ def main(args):
                     f"Train Loss: {avg_loss:.4f}, "
                     f"Loss Diff: {avg_loss_diff:.4f}, "
                     f"Loss Align: {avg_loss_align:.4f}, "
+                    f"Align Weight: {align_weight:.4f}, "
                     f"Train Steps/Sec: {steps_per_sec:.2f}"
                 )
 
@@ -492,6 +651,27 @@ def main(args):
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
 
+            if args.fid_every > 0 and train_steps % args.fid_every == 0 and train_steps > 0:
+                dist.barrier()
+                if rank == 0:
+                    evaluate_fid(
+                        ema=ema,
+                        diffusion=diffusion,
+                        vae=vae,
+                        args=args,
+                        device=device,
+                        step=train_steps,
+                        logger=logger,
+                    )
+                dist.barrier()
+
+            if train_steps >= args.max_steps:
+                logger.info(f"Reached max_steps={args.max_steps}. Stopping training.")
+                break
+
+        if train_steps >= args.max_steps:
+            break
+
     model.eval()
     if args.repa:
         repa_projector.eval()
@@ -509,18 +689,59 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
+    parser.add_argument("--max-steps", type=int, default=80_000)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")
+    parser.add_argument(
+        "--vae-model-dir",
+        type=str,
+        default=None,
+        help="Optional local directory for the SD VAE. If unset, rank 0 downloads/caches the HF repo first.",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--ckpt-every", type=int, default=50_000)
+    parser.add_argument("--ckpt-every", type=int, default=10_000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument(
+        "--fid-every",
+        type=int,
+        default=0,
+        help="Run inline FID every N training steps. Set <= 0 to disable inline FID.",
+    )
+    parser.add_argument("--fid-num-samples", type=int, default=5_000)
+    parser.add_argument("--fid-batch-size", type=int, default=32)
+    parser.add_argument("--fid-sampling-steps", type=int, default=250)
+    parser.add_argument("--fid-cfg-scale", type=float, default=1.5)
+    parser.add_argument(
+        "--fid-ref-dir",
+        type=str,
+        default="/data/liuchunfa/2026qjx/ILSVRC/Data/CLS-LOC/val",
+        help="Reference image directory used by pytorch-fid.",
+    )
+    parser.add_argument(
+        "--keep-fid-samples",
+        action="store_true",
+        help="Keep intermediate FID sample folders instead of deleting them after evaluation.",
+    )
 
     # Fixed REPA args
     parser.add_argument("--repa", action="store_true", help="Enable fixed REPA alignment.")
     parser.add_argument("--repa-lambda", type=float, default=0.1, help="Weight for alignment loss.")
+    parser.add_argument(
+        "--repa-schedule",
+        type=str,
+        choices=["constant", "linear"],
+        default="linear",
+        help="Alignment schedule over training steps.",
+    )
+    parser.add_argument(
+        "--repa-schedule-steps",
+        type=int,
+        default=40_000,
+        help="Number of steps over which alignment decays to zero when --repa-schedule=linear.",
+    )
     parser.add_argument("--repa-token-layer", type=int, default=None, help="DiT block index to extract tokens from.")
     parser.add_argument("--repa-hidden-dim", type=int, default=None, help="Hidden dim of REPA projector MLP.")
 
@@ -528,7 +749,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dino-model-dir",
         type=str,
-        default="/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/tmp/DiT/dinov3-vitb16-pretrain-lvd1689m",
+        default="/home/liuchunfa/.cache/modelscope/hub/models/facebook/dinov3-vitb16-pretrain-lvd1689m",
         help="Local HF-style DINOv3 model directory containing config.json and model.safetensors."
     )
 
