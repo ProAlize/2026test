@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ENV_PREFIX="${ENV_PREFIX:-/home/liuchunfa/anaconda3/envs/DiT}"
+# ── 改动1：换成你自己的环境路径 ──────────────────────────────────
+ENV_PREFIX="${ENV_PREFIX:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/tool/miniconda3/envs/dit}"
 TORCHRUN_BIN="${TORCHRUN_BIN:-$ENV_PREFIX/bin/torchrun}"
 
 CKPT_PATH="${1:-${CKPT_PATH:-}}"
@@ -12,13 +13,16 @@ if [[ -z "$CKPT_PATH" ]]; then
     exit 1
 fi
 
-FID_REF_DIR="${FID_REF_DIR:-/data/liuchunfa/2026qjx/ILSVRC/Data/CLS-LOC/val}"
-VAE_MODEL_DIR="${VAE_MODEL_DIR:-/home/liuchunfa/.cache/modelscope/hub/models/facebook/DiT-XL-2-256/vae}"
+# ── 改动2：换成你自己的参考数据集和VAE路径 ───────────────────────
+FID_REF_DIR="${FID_REF_DIR:-/data/temp/ILSVRC/Data/CLS-LOC/val}"
+VAE_MODEL_DIR="${VAE_MODEL_DIR:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/2026/models/DiT-XL-2-256/vae}"
 
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
-PER_PROC_BATCH_SIZE="${PER_PROC_BATCH_SIZE:-8}"
-FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-5000}"
+# ── 改动3：batch size调大，加快生成速度 ───────────────────────────
+PER_PROC_BATCH_SIZE="${PER_PROC_BATCH_SIZE:-64}"
+# ── 改动4：标准FID用50000张 ──────────────────────────────────────
+FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-50000}"
 FID_BATCH_SIZE="${FID_BATCH_SIZE:-32}"
 NUM_SAMPLING_STEPS="${NUM_SAMPLING_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.5}"
@@ -65,13 +69,21 @@ fi
 
 cd "$ROOT_DIR"
 
+echo "========================================================"
 echo "Starting offline FID evaluation"
-echo "Checkpoint: $CKPT_PATH"
-echo "Eval root: $EVAL_ROOT"
-echo "Reference dir: $FID_REF_DIR"
-echo "Torchrun: $TORCHRUN_BIN"
-echo "GPUs: $CUDA_VISIBLE_DEVICES"
-echo "Launch log: $LAUNCH_LOG"
+echo "Checkpoint       : $CKPT_PATH"
+echo "Eval root        : $EVAL_ROOT"
+echo "Reference dir    : $FID_REF_DIR"
+echo "VAE model dir    : $VAE_MODEL_DIR"
+echo "Torchrun         : $TORCHRUN_BIN"
+echo "GPUs             : $CUDA_VISIBLE_DEVICES"
+echo "Num GPUs         : $NPROC_PER_NODE"
+echo "Per-proc batch   : $PER_PROC_BATCH_SIZE"
+echo "FID num samples  : $FID_NUM_SAMPLES"
+echo "Sampling steps   : $NUM_SAMPLING_STEPS"
+echo "CFG scale        : $CFG_SCALE"
+echo "Launch log       : $LAUNCH_LOG"
+echo "========================================================"
 
 env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "$TORCHRUN_BIN" --standalone --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" \
