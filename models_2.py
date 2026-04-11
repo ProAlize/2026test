@@ -222,7 +222,7 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward_features(self, x, t, y, token_layer=None):
+    def forward_features(self, x, t, y, token_layer=None, force_drop_ids=None):
         """
         Return intermediate token features before the final output layer.
 
@@ -240,7 +240,7 @@ class DiT(nn.Module):
         """
         x = self.x_embedder(x) + self.pos_embed
         t = self.t_embedder(t)
-        y = self.y_embedder(y, self.training)
+        y = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)
         c = t + y
 
         mid_tokens = None
@@ -253,7 +253,7 @@ class DiT(nn.Module):
             mid_tokens = x
         return mid_tokens, c
 
-    def forward_with_tokens(self, x, t, y, token_layer=None):
+    def forward_with_tokens(self, x, t, y, token_layer=None, force_drop_ids=None):
         """
         Forward pass returning both DiT output and intermediate tokens.
 
@@ -261,39 +261,37 @@ class DiT(nn.Module):
             out: (N, out_channels, H, W)
             tokens: (N, T, D)
         """
+        return self.forward(
+            x,
+            t,
+            y,
+            force_drop_ids=force_drop_ids,
+            return_tokens=True,
+            token_layer=token_layer,
+        )
+
+    def forward(self, x, t, y, force_drop_ids=None, return_tokens=False, token_layer=None):
         x = self.x_embedder(x) + self.pos_embed
         t = self.t_embedder(t)
-        y = self.y_embedder(y, self.training)
+        y = self.y_embedder(y, self.training, force_drop_ids=force_drop_ids)
         c = t + y
-
         mid_tokens = None
         for i, block in enumerate(self.blocks):
             x = block(x, c)
-            if token_layer is not None and i == token_layer:
+            if return_tokens and token_layer is not None and i == token_layer:
                 mid_tokens = x
-
-        if mid_tokens is None:
+        if return_tokens and mid_tokens is None:
             mid_tokens = x
-
-        out = self.final_layer(x, c)
-        out = self.unpatchify(out)
-        return out, mid_tokens
-
-    def forward(self, x, t, y):
-        x = self.x_embedder(x) + self.pos_embed
-        t = self.t_embedder(t)
-        y = self.y_embedder(y, self.training)
-        c = t + y
-        for block in self.blocks:
-            x = block(x, c)
         x = self.final_layer(x, c)
         x = self.unpatchify(x)
+        if return_tokens:
+            return x, mid_tokens
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale):
+    def forward_with_cfg(self, x, t, y, cfg_scale, force_drop_ids=None):
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y, force_drop_ids=force_drop_ids)
         eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)

@@ -1,16 +1,26 @@
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
+import pathlib
 import shutil
-import subprocess
-import sys
+import traceback
 from time import strftime
 
+import numpy as np
 import torch
 import torch.distributed as dist
+import torchvision.transforms as TF
 from PIL import Image
 from diffusers.models import AutoencoderKL
+from pytorch_fid.fid_score import (
+    IMAGE_EXTENSIONS,
+    calculate_frechet_distance,
+)
+from pytorch_fid.inception import InceptionV3
+from torch.nn.functional import adaptive_avg_pool2d
 from tqdm import tqdm
 
 from diffusion import create_diffusion
@@ -24,6 +34,28 @@ torch.backends.cudnn.allow_tf32 = True
 def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
+
+
+def center_crop_arr(pil_image, image_size):
+    """
+    Center cropping implementation from ADM.
+    """
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(
+            tuple(x // 2 for x in pil_image.size),
+            resample=Image.BOX,
+        )
+
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(
+        tuple(round(x * scale) for x in pil_image.size),
+        resample=Image.BICUBIC,
+    )
+
+    arr = np.array(pil_image)
+    crop_y = (arr.shape[0] - image_size) // 2
+    crop_x = (arr.shape[1] - image_size) // 2
+    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
 
 def load_checkpoint(ckpt_path):
@@ -60,14 +92,135 @@ def load_vae(vae_model_dir, vae_name, device, rank):
     return vae
 
 
-def parse_fid(stdout_text):
-    for line in stdout_text.splitlines():
-        if "FID:" in line:
-            try:
-                return float(line.split("FID:")[-1].strip())
-            except ValueError:
-                return None
-    return None
+def collect_image_files(path):
+    """
+    Recursively collect image files with case-insensitive extension matching.
+    This avoids pytorch-fid's default behavior, which misses files like `.JPEG`.
+    """
+    root = pathlib.Path(path)
+    files = sorted(
+        str(file)
+        for file in root.rglob("*")
+        if file.is_file() and file.suffix.lower().lstrip(".") in IMAGE_EXTENSIONS
+    )
+    return files
+
+
+class ImagePathDataset(torch.utils.data.Dataset):
+    def __init__(self, files, image_size=None):
+        self.files = files
+        self.image_size = image_size
+        self.to_tensor = TF.ToTensor()
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, index):
+        path = self.files[index]
+        image = Image.open(path).convert("RGB")
+        if self.image_size is not None:
+            image = center_crop_arr(image, self.image_size)
+        return self.to_tensor(image)
+
+
+def get_activations(files, model, batch_size=50, dims=2048, device="cpu", num_workers=1, image_size=None):
+    model.eval()
+
+    if batch_size > len(files):
+        print(
+            "Warning: batch size is bigger than the data size. "
+            "Setting batch size to data size"
+        )
+        batch_size = len(files)
+
+    dataset = ImagePathDataset(files, image_size=image_size)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=num_workers,
+    )
+
+    pred_arr = np.empty((len(files), dims))
+    start_idx = 0
+
+    for batch in tqdm(dataloader):
+        batch = batch.to(device)
+
+        with torch.no_grad():
+            pred = model(batch)[0]
+
+        if pred.size(2) != 1 or pred.size(3) != 1:
+            pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
+
+        pred = pred.squeeze(3).squeeze(2).cpu().numpy()
+        pred_arr[start_idx:start_idx + pred.shape[0]] = pred
+        start_idx += pred.shape[0]
+
+    return pred_arr
+
+
+def calculate_activation_statistics(files, model, batch_size=50, dims=2048, device="cpu", num_workers=1, image_size=None):
+    act = get_activations(
+        files,
+        model,
+        batch_size=batch_size,
+        dims=dims,
+        device=device,
+        num_workers=num_workers,
+        image_size=image_size,
+    )
+    mu = np.mean(act, axis=0)
+    sigma = np.cov(act, rowvar=False)
+    return mu, sigma
+
+
+def compute_fid_for_paths(sample_path, reference_path, batch_size, device, dims=2048, num_workers=1, image_size=None):
+    """
+    Compute FID directly through pytorch-fid library functions so we can
+    support uppercase extensions and keep detailed stdout/stderr logs.
+    """
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+
+    try:
+        with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+            block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
+            inception = InceptionV3([block_idx]).to(device)
+            inception.eval()
+            requires_grad(inception, False)
+
+            if sample_path.endswith(".npz"):
+                with np.load(sample_path) as f:
+                    mu_sample, sigma_sample = f["mu"][:], f["sigma"][:]
+            else:
+                sample_files = collect_image_files(sample_path)
+                if not sample_files:
+                    raise ValueError(f"No sample images found in: {sample_path}")
+                mu_sample, sigma_sample = calculate_activation_statistics(
+                    sample_files, inception, batch_size, dims, device, num_workers, image_size=image_size
+                )
+
+            if reference_path.endswith(".npz"):
+                with np.load(reference_path) as f:
+                    mu_ref, sigma_ref = f["mu"][:], f["sigma"][:]
+            else:
+                ref_files = collect_image_files(reference_path)
+                if not ref_files:
+                    raise ValueError(
+                        f"No reference images found in: {reference_path}. "
+                        "If this directory contains files like `.JPEG`, the old CLI-based "
+                        "pytorch-fid path would miss them due to case-sensitive globbing."
+                    )
+                mu_ref, sigma_ref = calculate_activation_statistics(
+                    ref_files, inception, batch_size, dims, device, num_workers, image_size=image_size
+                )
+
+            fid_value = float(calculate_frechet_distance(mu_sample, sigma_sample, mu_ref, sigma_ref))
+        return 0, fid_value, stdout_buffer.getvalue(), stderr_buffer.getvalue()
+    except Exception:
+        return 1, None, stdout_buffer.getvalue(), stderr_buffer.getvalue() + traceback.format_exc()
 
 
 def main(args):
@@ -167,20 +320,13 @@ def main(args):
     if rank != 0:
         return
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytorch_fid",
-        args.sample_dir,
-        args.fid_ref_dir,
-        "--device",
-        f"cuda:{device}",
-        "--batch-size",
-        str(args.fid_batch_size),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-
-    fid_value = parse_fid(proc.stdout) if proc.returncode == 0 else None
+    returncode, fid_value, fid_stdout, fid_stderr = compute_fid_for_paths(
+        sample_path=args.sample_dir,
+        reference_path=args.fid_ref_dir,
+        batch_size=args.fid_batch_size,
+        device=f"cuda:{device}" if torch.cuda.is_available() else "cpu",
+        image_size=image_size,
+    )
     metrics = {
         "checkpoint": os.path.abspath(args.ckpt),
         "model": model_name,
@@ -193,7 +339,7 @@ def main(args):
         "cfg_scale": args.cfg_scale,
         "sample_dir": os.path.abspath(args.sample_dir),
         "fid_ref_dir": os.path.abspath(args.fid_ref_dir),
-        "returncode": proc.returncode,
+        "returncode": returncode,
         "fid": fid_value,
     }
 
@@ -203,13 +349,13 @@ def main(args):
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
     with open(stdout_path, "w", encoding="utf-8") as f:
-        f.write(proc.stdout)
+        f.write(fid_stdout)
     with open(stderr_path, "w", encoding="utf-8") as f:
-        f.write(proc.stderr)
+        f.write(fid_stderr)
 
-    if proc.returncode != 0:
+    if returncode != 0:
         print(f"FID evaluation failed. See {stdout_path} and {stderr_path}.")
-        raise SystemExit(proc.returncode)
+        raise SystemExit(returncode)
 
     if fid_value is None:
         print(f"FID finished but could not parse a numeric result. See {stdout_path}.")
