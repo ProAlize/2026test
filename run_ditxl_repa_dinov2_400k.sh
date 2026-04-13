@@ -95,7 +95,7 @@ env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         --standalone \
         --nnodes=1 \
         --nproc_per_node="$NPROC_PER_NODE" \
-    "$ROOT_DIR/train_sasa_dinov2.py" \
+    "$ROOT_DIR/train_ditxl_repa_dinov2_400k.py" \
         --data-path              "$DATA_PATH"             \
         --results-dir            "$RESULTS_DIR"           \
         --model                  DiT-XL/2                 \
