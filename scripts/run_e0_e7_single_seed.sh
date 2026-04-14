@@ -257,6 +257,9 @@ run_s3a() {
     local ema_flag="--no-s3a-use-ema-source"
     local gate_flag="--no-s3a-enable-selective-gate"
     local auto_mitigate_flag="--no-s3a-collapse-auto-mitigate"
+    local floor_tag="${S3A_DINO_ALPHA_FLOOR//./p}"
+    local contract_suffix="w${S3A_SELF_WARMUP_STEPS}_f${floor_tag}_fs${S3A_DINO_ALPHA_FLOOR_STEPS}_p${S3A_PROBE_EVERY}_cw${S3A_COLLAPSE_WINDOWS}_m${S3A_COLLAPSE_AUTO_MITIGATE}"
+    local exp_name_with_contract="${exp_name}__${contract_suffix}"
 
     if [[ "$use_ema_source" == "1" ]]; then
         ema_flag="--s3a-use-ema-source"
@@ -268,7 +271,7 @@ run_s3a() {
         auto_mitigate_flag="--s3a-collapse-auto-mitigate"
     fi
 
-    run_cmd "$exp_name" \
+    run_cmd "$exp_name_with_contract" \
         "$TORCHRUN_BIN" \
         --standalone \
         --nnodes=1 \
@@ -276,7 +279,7 @@ run_s3a() {
         "$ROOT_DIR/train_s3a_multisource_dinov2.py" \
         --s3a \
         --data-path "$DATA_PATH" \
-        --results-dir "$RUN_DIR/$exp_name" \
+        --results-dir "$RUN_DIR/$exp_name_with_contract" \
         --model "$MODEL" \
         --image-size "$IMAGE_SIZE" \
         --num-classes "$NUM_CLASSES" \

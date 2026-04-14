@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_sit_repa_dinov2_400k.sh
+# run_sitxl_repa_dinov2_400k.sh
 # SiT-XL/2 + REPA (DINOv2 ViT-B/14 本地权重) 400k 步训练
 # 与 DiT 版脚本保持相同的路径约定和超参风格
 set -euo pipefail
@@ -53,7 +53,7 @@ if [[ ! -x "$TORCHRUN_BIN" ]]; then
 fi
 
 for required_path in \
-    "$ROOT_DIR/train_sitxl_repa_dinov2_400k" \
+    "$ROOT_DIR/train_sitxl_repa_dinov2_400k.py" \
     "$DATA_PATH" \
     "$VAE_MODEL_DIR" \
     "$DINOV2_REPO_DIR" \
@@ -115,7 +115,7 @@ env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         --standalone \
         --nnodes=1 \
         --nproc_per_node="$NPROC_PER_NODE" \
-    "$ROOT_DIR/train_sit_repa_dinov2.py" \
+    "$ROOT_DIR/train_sitxl_repa_dinov2_400k.py" \
         --data-path              "$DATA_PATH"             \
         --results-dir            "$RESULTS_DIR"           \
         --model                  SiT-XL/2                 \

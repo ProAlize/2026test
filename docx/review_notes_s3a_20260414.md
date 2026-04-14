@@ -22,3 +22,8 @@
 ## Writing Boundary
 - Allowed now: stability and engineering contract claims.
 - Forbidden now: over-claiming reliability routing or multi-source bank generality.
+
+## 2026-04-15 Post-Patch Review Update
+- New report: `/home/liuchunfa/2026qjx/2026test/RESEARCH_REVIEW_S3A_POSTPATCH_20260415.md`
+- Reliability moved from ~4.5/10 to ~5.8/10 after contract hardening.
+- Remaining blocker is method-level utility-policy mismatch + provenance closure.

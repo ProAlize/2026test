@@ -21,6 +21,7 @@ import hashlib
 import random
 import argparse
 import logging
+import subprocess
 from time import time, strftime
 from copy import deepcopy
 from collections import OrderedDict
@@ -116,6 +117,19 @@ def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def get_git_revision(cwd: str) -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return out.strip()
+    except Exception:
+        return "unknown"
 
 
 def atomic_write_json(path: str, payload: dict) -> None:
@@ -1268,11 +1282,21 @@ def _is_equal_resume_value(current: Any, saved: Any, tol: float = 1e-12) -> bool
     return current == saved
 
 
-def _validate_resume_contract(current_args, saved_args_dict: Dict[str, Any]) -> None:
+def _validate_resume_contract(
+    current_args,
+    saved_args_dict: Dict[str, Any],
+    allow_legacy_resume_args: bool = False,
+) -> None:
     if not saved_args_dict:
         return
     keys = [
         "model",
+        "data_path",
+        "global_batch_size",
+        "global_seed",
+        "num_workers",
+        "vae_model_dir",
+        "dinov2_weight_path",
         "s3a",
         "s3a_use_ema_source",
         "s3a_trainable_ema_adapters",
@@ -1312,15 +1336,23 @@ def _validate_resume_contract(current_args, saved_args_dict: Dict[str, Any]) -> 
         "s3a_max_grad_norm",
     ]
     mismatches = []
+    missing_keys = []
     for key in keys:
         if not hasattr(current_args, key):
             continue
         if key not in saved_args_dict:
+            missing_keys.append(key)
             continue
         current_val = getattr(current_args, key)
         saved_val = saved_args_dict[key]
         if not _is_equal_resume_value(current_val, saved_val):
             mismatches.append((key, current_val, saved_val))
+    if missing_keys and not allow_legacy_resume_args:
+        raise ValueError(
+            "Resume contract missing critical keys in checkpoint args: "
+            f"{missing_keys[:8]}{' ...' if len(missing_keys) > 8 else ''}. "
+            "Use --allow-legacy-resume-args to bypass (unsafe)."
+        )
     if mismatches:
         detail = ", ".join(
             [f"{k}(current={c}, checkpoint={s})" for (k, c, s) in mismatches[:8]]
@@ -1405,6 +1437,7 @@ def load_checkpoint(
     opt,
     s3a_head=None,
     current_args=None,
+    allow_legacy_resume_args: bool = False,
     allow_missing_manifest: bool = False,
 ) -> Tuple[int, int, Optional[List[dict]], Dict[str, Any]]:
     _validate_checkpoint_manifest(
@@ -1428,7 +1461,11 @@ def load_checkpoint(
     if not isinstance(saved_runtime_state, dict):
         saved_runtime_state = {}
     if current_args is not None:
-        _validate_resume_contract(current_args, saved_args_dict)
+        _validate_resume_contract(
+            current_args,
+            saved_args_dict,
+            allow_legacy_resume_args=allow_legacy_resume_args,
+        )
 
     if model_state is None or ema_state is None or opt_state is None:
         raise ValueError(
@@ -1492,6 +1529,7 @@ def main(args):
     local_rank = int(os.environ.get("LOCAL_RANK", rank % torch.cuda.device_count()))
     device = local_rank
     seed = args.global_seed * dist.get_world_size() + rank
+    git_revision = get_git_revision(os.getcwd())
 
     torch.manual_seed(seed)
     torch.cuda.set_device(device)
@@ -1514,12 +1552,14 @@ def main(args):
         checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=False)
         metrics_jsonl_path = os.path.join(experiment_dir, "metrics.jsonl")
+        resolved_args_path = os.path.join(experiment_dir, "resolved_args.json")
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
     else:
         logger = create_logger(None)
         checkpoint_dir = None
         metrics_jsonl_path = None
+        resolved_args_path = None
 
     assert args.image_size % 8 == 0, "image_size must be divisible by 8."
     latent_size = args.image_size // 8
@@ -1698,6 +1738,7 @@ def main(args):
             opt=opt,
             s3a_head=s3a_head if args.s3a else None,
             current_args=args,
+            allow_legacy_resume_args=args.allow_legacy_resume_args,
             allow_missing_manifest=args.allow_missing_manifest,
         )
         resumed_s3a_runtime_state = dict(resume_meta.get("s3a_runtime_state", {}))
@@ -1826,6 +1867,19 @@ def main(args):
                 "--s3a-source-gate-threshold is deprecated and ignored; "
                 "utility-driven gate uses --s3a-gate-utility-* thresholds."
             )
+
+    if rank == 0 and resolved_args_path is not None:
+        resolved_payload = {
+            "git_revision": git_revision,
+            "created_at": strftime("%Y-%m-%d %H:%M:%S"),
+            "resume_from": args.resume,
+            "argv": sys.argv,
+            "allow_missing_manifest": bool(args.allow_missing_manifest),
+            "allow_legacy_resume_args": bool(args.allow_legacy_resume_args),
+            "args": _namespace_to_dict(args),
+        }
+        atomic_write_json(resolved_args_path, resolved_payload)
+        logger.info(f"Resolved args saved at {resolved_args_path}")
 
     done = False
     final_ckpt_saved = False
@@ -1966,6 +2020,16 @@ def main(args):
                     logger.warning(
                         f"Non-finite loss at step={train_steps}. Skip optimizer step."
                     )
+                    if metrics_jsonl_path is not None:
+                        event_row = {
+                            "event": "non_finite_loss",
+                            "step": int(train_steps),
+                            "batches_seen": int(batches_seen),
+                            "git_revision": git_revision,
+                            "resume_from": args.resume,
+                        }
+                        with open(metrics_jsonl_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(event_row, ensure_ascii=True) + "\n")
                 opt.zero_grad(set_to_none=True)
                 continue
 
@@ -1989,6 +2053,16 @@ def main(args):
                         logger.warning(
                             f"Non-finite grad norm at step={train_steps}. Skip optimizer step."
                         )
+                        if metrics_jsonl_path is not None:
+                            event_row = {
+                                "event": "non_finite_grad",
+                                "step": int(train_steps),
+                                "batches_seen": int(batches_seen),
+                                "git_revision": git_revision,
+                                "resume_from": args.resume,
+                            }
+                            with open(metrics_jsonl_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps(event_row, ensure_ascii=True) + "\n")
                     opt.zero_grad(set_to_none=True)
                     continue
             opt.step()
@@ -2123,6 +2197,8 @@ def main(args):
                     collapse_alarm_windows = (
                         collapse_alarm_windows + 1 if collapse_window_triggered else 0
                     )
+                else:
+                    collapse_alarm_windows = 0
                 collapse_alarm = (
                     1.0 if collapse_alarm_windows >= args.s3a_collapse_windows else 0.0
                 )
@@ -2207,6 +2283,8 @@ def main(args):
                     metric_row = {
                         "step": int(train_steps),
                         "batches_seen": int(batches_seen),
+                        "git_revision": git_revision,
+                        "resume_from": args.resume,
                         "global_seed": int(args.global_seed),
                         "loss": float(avg_loss),
                         "loss_diff": float(avg_loss_diff),
@@ -2436,6 +2514,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-missing-manifest",
         action="store_true",
         help="Allow resuming from checkpoints without .sha256.json sidecar.",
+    )
+    parser.add_argument(
+        "--allow-legacy-resume-args",
+        action="store_true",
+        help=(
+            "Allow resume when checkpoint args miss critical contract keys. "
+            "Unsafe; default is fail-closed."
+        ),
     )
 
     parser.add_argument(

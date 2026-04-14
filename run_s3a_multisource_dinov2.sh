@@ -57,6 +57,7 @@ S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS="${S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS
 S3A_TRAINABLE_EMA_ADAPTERS="${S3A_TRAINABLE_EMA_ADAPTERS:-0}"
 RESUME_CKPT="${RESUME_CKPT:-}"
 ALLOW_MISSING_MANIFEST="${ALLOW_MISSING_MANIFEST:-0}"
+ALLOW_LEGACY_RESUME_ARGS="${ALLOW_LEGACY_RESUME_ARGS:-0}"
 
 if [[ ! -x "$TORCHRUN_BIN" ]]; then
     echo "[ERROR] torchrun not found: $TORCHRUN_BIN" >&2; exit 1
@@ -153,6 +154,7 @@ echo "DINOv2 weight    : $DINOV2_WEIGHT_PATH"
 echo "VAE              : $VAE_MODEL_DIR"
 [[ -n "$S3A_LAYER_WEIGHTS" ]] && echo "S3A layer weights: $S3A_LAYER_WEIGHTS"
 [[ -n "$RESUME_CKPT" ]] && echo "Resume checkpoint: $RESUME_CKPT"
+echo "Allow legacy args: $ALLOW_LEGACY_RESUME_ARGS"
 echo "=================================================="
 
 OPTIONAL_ARGS=()
@@ -165,6 +167,9 @@ fi
 if [[ "$ALLOW_MISSING_MANIFEST" == "1" ]]; then
     OPTIONAL_ARGS+=(--allow-missing-manifest)
 fi
+if [[ "$ALLOW_LEGACY_RESUME_ARGS" == "1" ]]; then
+    OPTIONAL_ARGS+=(--allow-legacy-resume-args)
+fi
 if [[ "$S3A_TRAINABLE_EMA_ADAPTERS" == "1" ]]; then
     OPTIONAL_ARGS+=(--s3a-trainable-ema-adapters)
 else
@@ -175,6 +180,16 @@ if [[ "$S3A_COLLAPSE_AUTO_MITIGATE" == "1" ]]; then
 else
     OPTIONAL_ARGS+=(--no-s3a-collapse-auto-mitigate)
 fi
+
+for arg in "$@"; do
+    case "$arg" in
+        --s3a-*|--data-path|--results-dir|--model|--image-size|--global-batch-size|--global-seed|--num-workers|--epochs|--max-steps|--ckpt-every|--log-every|--vae-model-dir|--dinov2-repo-dir|--dinov2-weight-path|--resume|--allow-missing-manifest)
+            echo "[ERROR] Do not override managed launcher arg via trailing CLI: $arg" >&2
+            echo "        Use environment variables in this launcher instead." >&2
+            exit 1
+            ;;
+    esac
+done
 
 env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     "$TORCHRUN_BIN" \

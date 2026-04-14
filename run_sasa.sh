@@ -26,8 +26,6 @@ REPA_TOKEN_LAYER="${REPA_TOKEN_LAYER:-}"
 REPA_HIDDEN_DIM="${REPA_HIDDEN_DIM:-}"
 REPA_TRAIN_SCHEDULE="${REPA_TRAIN_SCHEDULE:-linear_decay}"
 REPA_SCHEDULE_STEPS="${REPA_SCHEDULE_STEPS:-40000}"
-# REPA_DIFF_SCHEDULE 仍传入以保持参数兼容，但训练代码中已忽略
-REPA_DIFF_SCHEDULE="${REPA_DIFF_SCHEDULE:-cosine}"
 
 # ---------------------------------------------------------------
 # Sanity checks
@@ -83,7 +81,7 @@ echo "Ckpt every         : $CKPT_EVERY steps"
 echo "Log every          : $LOG_EVERY steps"
 echo "REPA lambda        : $REPA_LAMBDA"
 echo "Train schedule     : $REPA_TRAIN_SCHEDULE  (decay over $REPA_SCHEDULE_STEPS steps)"
-echo "Diff  schedule     : DISABLED (uniform across all timesteps)"
+echo "Diff  schedule     : DISABLED in train_sasa.py (step-only SASA variant)"
 echo "VAE model dir      : $VAE_MODEL_DIR"
 [[ -n "$REPA_TOKEN_LAYER" ]] && echo "Token layer        : $REPA_TOKEN_LAYER"
 [[ -n "$REPA_HIDDEN_DIM"  ]] && echo "Projector hidden   : $REPA_HIDDEN_DIM"
@@ -109,7 +107,6 @@ env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --repa-lambda            "$REPA_LAMBDA" \
     --repa-train-schedule    "$REPA_TRAIN_SCHEDULE" \
     --repa-schedule-steps    "$REPA_SCHEDULE_STEPS" \
-    --repa-diff-schedule     "$REPA_DIFF_SCHEDULE" \
     --dino-model-dir         "$DINO_MODEL_DIR" \
     --vae-model-dir          "$VAE_MODEL_DIR" \
     "${OPTIONAL_ARGS[@]}" \

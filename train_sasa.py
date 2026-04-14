@@ -101,14 +101,17 @@ def center_crop_arr(pil_image, image_size):
 
 
 class REPAProjector(nn.Module):
-    """Project DiT tokens to DINO token feature space."""
+    """REPA-faithful projector: 3-layer MLP with SiLU, default width 2048."""
     def __init__(self, in_dim, out_dim, hidden_dim=None):
         super().__init__()
+        # Keep old arg name for compatibility. REPA-faithful default is 2048.
         if hidden_dim is None:
-            hidden_dim = in_dim
+            hidden_dim = 2048
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, out_dim),
         )
 
@@ -634,7 +637,7 @@ if __name__ == "__main__":
                         help="DiT block index to hook for token extraction. "
                              "Default: last block.")
     parser.add_argument("--repa-hidden-dim",  type=int, default=None,
-                        help="Hidden dim of REPA projector MLP.")
+                        help="REPA projector width. Default=2048 (REPA-faithful).")
     parser.add_argument(
         "--repa-train-schedule", type=str,
         choices=["constant", "linear_decay", "cutoff"],
@@ -645,13 +648,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repa-schedule-steps", type=int, default=40_000,
         help="Steps over which the training-phase weight decays to 0."
-    )
-    # 保留此参数以兼容旧脚本，训练中不再使用
-    parser.add_argument(
-        "--repa-diff-schedule", type=str,
-        choices=["constant", "cosine", "linear_high", "linear_low"],
-        default="cosine",
-        help="[DEPRECATED] Diffusion timestep weighting is disabled."
     )
     parser.add_argument(
         "--dino-model-dir", type=str,

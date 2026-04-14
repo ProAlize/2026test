@@ -244,21 +244,40 @@ class LocalDINOv2Teacher(nn.Module):
             pretrained=False,
         )
 
-        state_dict = torch.load(weight_path, map_location="cpu")
-        if "model" in state_dict:
-            state_dict = state_dict["model"]
-        elif "teacher" in state_dict:
-            state_dict = state_dict["teacher"]
+        raw_state = torch.load(weight_path, map_location="cpu")
+        if not isinstance(raw_state, dict):
+            raise ValueError(
+                f"Unexpected DINO checkpoint format in {weight_path}: "
+                f"expected dict, got {type(raw_state)}"
+            )
 
-        missing, unexpected = self.model.load_state_dict(
-            state_dict, strict=False
-        )
-        if missing:
-            print(f"[DINOv2Teacher] missing keys ({len(missing)}): "
-                  f"{missing[:5]} ...")
-        if unexpected:
-            print(f"[DINOv2Teacher] unexpected keys ({len(unexpected)}): "
-                  f"{unexpected[:5]} ...")
+        if {"model_state", "ema_state", "opt_state"}.issubset(raw_state.keys()) or {
+            "model",
+            "ema",
+            "opt",
+        }.issubset(raw_state.keys()):
+            raise ValueError(
+                "The provided --dinov2-weight-path looks like a diffusion training "
+                "checkpoint, not a DINOv2 teacher checkpoint."
+            )
+
+        if "teacher" in raw_state and isinstance(raw_state["teacher"], dict):
+            state_dict = raw_state["teacher"]
+        elif "model" in raw_state and isinstance(raw_state["model"], dict):
+            state_dict = raw_state["model"]
+        else:
+            state_dict = raw_state
+
+        if state_dict and all(k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k[len("module."):]: v for k, v in state_dict.items()}
+
+        try:
+            self.model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Failed to strictly load DINOv2 teacher checkpoint. "
+                f"Please verify --dinov2-weight-path: {weight_path}"
+            ) from exc
 
         self.model.eval()
         requires_grad(self.model, False)
@@ -311,16 +330,21 @@ def preprocess_for_dino(x: torch.Tensor) -> torch.Tensor:
 
 class REPAProjector(nn.Module):
     """
-    两层 MLP，将 SiT 中间 token 投影到 DINOv2 特征空间。
-    结构：Linear → GELU → Linear（与 REPA 原版一致）
+    REPA-faithful projector:
+    Linear(in_dim, projector_dim) -> SiLU ->
+    Linear(projector_dim, projector_dim) -> SiLU ->
+    Linear(projector_dim, out_dim)
     """
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = None):
         super().__init__()
+        # Keep old arg name for compatibility. REPA-faithful default is 2048.
         if hidden_dim is None:
-            hidden_dim = in_dim
+            hidden_dim = 2048
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, out_dim),
         )
 
@@ -969,7 +993,12 @@ if __name__ == "__main__":
             "SiT-XL/2 共 28 层，默认 hook 第 7 层（0-indexed）。"
         ),
     )
-    parser.add_argument("--repa-hidden-dim",   type=int,   default=None)
+    parser.add_argument(
+        "--repa-hidden-dim",
+        type=int,
+        default=None,
+        help="REPA projector width. Default=2048 (REPA-faithful).",
+    )
     parser.add_argument(
         "--repa-train-schedule", type=str,
         choices=["constant", "linear_decay", "cosine_decay", "cutoff"],

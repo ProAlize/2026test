@@ -31,6 +31,15 @@
 - 不再将 `text-to-image`、控制生成、编辑任务与主表混排
 - 所有主结果必须报告质量、效率和稳定性，而不只报告 `FID`
 
+## 实现冻结口径（2026-04-14，避免架构混淆）
+
+- 口径真值源：`docx/implementation_contract_20260414.md`
+- `t-aware` 真值实现位于分支 `exp_taware_adm_eval_20260410`（该分支的 `train_2.py`）；当前工作分支中的 `train_2.py` 不再作为 t-aware 真值引用。
+- `t-aware` 与 `SASA`：统一使用 **REPA-faithful projector**（`3xLinear + 2xSiLU`，默认 `projector_dim=2048`）。
+- `SASA` 相对 `t-aware` 的主差异：对齐权重调度与时间轴策略；**projector 不作为差异点**。
+- `S3A`：保持外置可替换对齐分支（multi-layer tap + router + gate + holistic loss），不回退为 REPA 内置 `ModuleList` 结构。
+- 为保证与 REPA/iREPA 对照公平性：`t-aware` 与 `SASA` 的 projector 结构和默认宽度保持一致，不再混用 `2-layer GELU` 变体。
+
 ## 资源与执行约束
 
 - 默认算力假设：`1` 个 `8x A100/H100 80GB` 节点或等效资源

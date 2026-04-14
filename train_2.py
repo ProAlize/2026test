@@ -120,15 +120,22 @@ def center_crop_arr(pil_image, image_size):
 
 class REPAProjector(nn.Module):
     """
-    Project DiT tokens to DINO token feature space.
+    REPA-faithful projector:
+    Linear(in_dim, projector_dim) -> SiLU ->
+    Linear(projector_dim, projector_dim) -> SiLU ->
+    Linear(projector_dim, out_dim)
     """
     def __init__(self, in_dim, out_dim, hidden_dim=None):
         super().__init__()
+        # Keep the old CLI name for compatibility.
+        # In REPA-faithful mode, default projector width is 2048.
         if hidden_dim is None:
-            hidden_dim = in_dim
+            hidden_dim = 2048
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, out_dim),
         )
 
@@ -743,7 +750,12 @@ if __name__ == "__main__":
         help="Number of steps over which alignment decays to zero when --repa-schedule=linear.",
     )
     parser.add_argument("--repa-token-layer", type=int, default=None, help="DiT block index to extract tokens from.")
-    parser.add_argument("--repa-hidden-dim", type=int, default=None, help="Hidden dim of REPA projector MLP.")
+    parser.add_argument(
+        "--repa-hidden-dim",
+        type=int,
+        default=None,
+        help="REPA projector width. Default=2048 (REPA-faithful).",
+    )
 
     # Local DINOv3 teacher
     parser.add_argument(
