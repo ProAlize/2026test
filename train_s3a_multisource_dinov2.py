@@ -647,6 +647,31 @@ class S3AAlignmentHead(nn.Module):
             "source_utility_ema",
             torch.zeros(len(self.layer_indices), self.num_sources, dtype=torch.float32),
         )
+        self.register_buffer(
+            "self_mitigation_windows_remaining",
+            torch.zeros(1, dtype=torch.long),
+        )
+
+    @torch.no_grad()
+    def set_self_mitigation_windows(self, windows: int) -> None:
+        if self.num_sources <= 1:
+            return
+        self.self_mitigation_windows_remaining.fill_(max(0, int(windows)))
+        if int(self.self_mitigation_windows_remaining.item()) > 0:
+            self.source_gate_mask[:, 1] = 0.0
+            self.source_inactive_steps[:, 1] = 0
+            self.source_recover_steps[:, 1] = 0
+
+    @torch.no_grad()
+    def tick_self_mitigation_window(self) -> int:
+        if self.num_sources <= 1:
+            return 0
+        remaining = int(self.self_mitigation_windows_remaining.item())
+        if remaining <= 0:
+            return 0
+        remaining -= 1
+        self.self_mitigation_windows_remaining.fill_(remaining)
+        return remaining
 
     @torch.no_grad()
     def update_gate_state(
@@ -666,6 +691,15 @@ class S3AAlignmentHead(nn.Module):
         for src_idx in range(self.num_sources):
             if protect_source0 and src_idx == 0:
                 self.source_gate_mask[layer_slot, src_idx] = 1.0
+                self.source_inactive_steps[layer_slot, src_idx] = 0
+                self.source_recover_steps[layer_slot, src_idx] = 0
+                continue
+
+            if (
+                src_idx == 1
+                and int(self.self_mitigation_windows_remaining.item()) > 0
+            ):
+                self.source_gate_mask[layer_slot, src_idx] = 0.0
                 self.source_inactive_steps[layer_slot, src_idx] = 0
                 self.source_recover_steps[layer_slot, src_idx] = 0
                 continue
@@ -713,6 +747,12 @@ class S3AAlignmentHead(nn.Module):
         mask = source_ready.clone()
 
         if self.use_ema_source and current_step < self_warmup_steps:
+            mask[1] = 0.0
+        if (
+            self.use_ema_source
+            and self.num_sources > 1
+            and int(self.self_mitigation_windows_remaining.item()) > 0
+        ):
             mask[1] = 0.0
 
         if enable_selective_gate:
@@ -1240,6 +1280,11 @@ def _validate_resume_contract(current_args, saved_args_dict: Dict[str, Any]) -> 
         "s3a_self_warmup_steps",
         "s3a_dino_alpha_floor",
         "s3a_dino_alpha_floor_steps",
+        "s3a_train_schedule",
+        "s3a_schedule_steps",
+        "s3a_diff_schedule",
+        "s3a_layer_weight_mode",
+        "s3a_layer_weights",
         "s3a_probe_every",
         "s3a_utility_probe_mode",
         "s3a_gate_patience",
@@ -1247,11 +1292,24 @@ def _validate_resume_contract(current_args, saved_args_dict: Dict[str, Any]) -> 
         "s3a_gate_utility_off_threshold",
         "s3a_gate_utility_on_threshold",
         "s3a_gate_utility_ema_momentum",
+        "s3a_collapse_alpha_threshold",
+        "s3a_collapse_self_threshold",
+        "s3a_collapse_margin",
+        "s3a_collapse_utility_threshold",
+        "s3a_collapse_windows",
+        "s3a_collapse_auto_mitigate",
+        "s3a_collapse_mitigate_windows",
+        "s3a_collapse_mitigate_cooldown_windows",
         "s3a_feat_weight",
         "s3a_attn_weight",
         "s3a_spatial_weight",
         "s3a_layer_indices",
         "s3a_lambda",
+        "s3a_adapter_hidden_dim",
+        "s3a_router_hidden_dim",
+        "s3a_router_detach_input",
+        "s3a_attn_max_tokens",
+        "s3a_max_grad_norm",
     ]
     mismatches = []
     for key in keys:
@@ -1291,6 +1349,7 @@ def _migrate_legacy_s3a_state(
         "source_inactive_steps",
         "source_recover_steps",
         "source_utility_ema",
+        "self_mitigation_windows_remaining",
         "ema_adapters.",
     )
     disallowed_missing = [k for k in missing if not k.startswith(legacy_fill_keys)]
@@ -1655,7 +1714,9 @@ def main(args):
             f"Resumed from checkpoint: {args.resume} "
             f"(train_steps={resumed_train_steps}, batches_seen={resumed_batches_seen}, "
             f"rng_restored={resumed_rng_states is not None}, "
-            f"collapse_alarm_windows={int(resumed_s3a_runtime_state.get('collapse_alarm_windows', 0))})"
+            f"collapse_alarm_windows={int(resumed_s3a_runtime_state.get('collapse_alarm_windows', 0))}, "
+            f"collapse_mitigation_cooldown_windows={int(resumed_s3a_runtime_state.get('collapse_mitigation_cooldown_windows', 0))}, "
+            f"collapse_mitigation_trigger_count={int(resumed_s3a_runtime_state.get('collapse_mitigation_trigger_count', 0))})"
         )
 
     if args.resume is None:
@@ -1697,6 +1758,12 @@ def main(args):
     running_alpha_dino_max_layer = 0.0
     running_alpha_dino_layers = [0.0 for _ in s3a_layer_indices]
     collapse_alarm_windows = int(resumed_s3a_runtime_state.get("collapse_alarm_windows", 0))
+    collapse_mitigation_cooldown_windows = int(
+        resumed_s3a_runtime_state.get("collapse_mitigation_cooldown_windows", 0)
+    )
+    collapse_mitigation_trigger_count = int(
+        resumed_s3a_runtime_state.get("collapse_mitigation_trigger_count", 0)
+    )
     gate_off_probe_windows = max(1, math.ceil(args.s3a_gate_patience / max(1, args.s3a_probe_every)))
     gate_reopen_probe_windows = max(
         1, math.ceil(args.s3a_gate_reopen_patience / max(1, args.s3a_probe_every))
@@ -1745,11 +1812,20 @@ def main(args):
             f"u_dino>{args.s3a_collapse_utility_threshold}, "
             f"margin={args.s3a_collapse_margin}, "
             f"windows={args.s3a_collapse_windows}\n"
+            f"  collapse mitigation: "
+            f"enabled={args.s3a_collapse_auto_mitigate}, "
+            f"hold_windows={args.s3a_collapse_mitigate_windows}, "
+            f"cooldown_windows={args.s3a_collapse_mitigate_cooldown_windows}\n"
             f"  probe every        : {args.s3a_probe_every}\n"
             f"  probe mode         : {args.s3a_utility_probe_mode}\n"
             f"  loss weights       : feat={args.s3a_feat_weight}, "
             f"attn={args.s3a_attn_weight}, spatial={args.s3a_spatial_weight}"
         )
+        if rank == 0:
+            logger.warning(
+                "--s3a-source-gate-threshold is deprecated and ignored; "
+                "utility-driven gate uses --s3a-gate-utility-* thresholds."
+            )
 
     done = False
     final_ckpt_saved = False
@@ -2050,6 +2126,32 @@ def main(args):
                 collapse_alarm = (
                     1.0 if collapse_alarm_windows >= args.s3a_collapse_windows else 0.0
                 )
+                mitigation_active_windows = 0
+                if args.s3a and args.s3a_use_ema_source:
+                    mitigation_active_windows = int(
+                        s3a_head.module.self_mitigation_windows_remaining.item()
+                    )
+                mitigation_triggered = 0.0
+                if (
+                    args.s3a
+                    and args.s3a_use_ema_source
+                    and args.s3a_enable_selective_gate
+                    and args.s3a_collapse_auto_mitigate
+                    and collapse_alarm > 0
+                    and mitigation_active_windows <= 0
+                    and collapse_mitigation_cooldown_windows <= 0
+                ):
+                    s3a_head.module.set_self_mitigation_windows(
+                        args.s3a_collapse_mitigate_windows
+                    )
+                    mitigation_active_windows = int(
+                        s3a_head.module.self_mitigation_windows_remaining.item()
+                    )
+                    collapse_mitigation_cooldown_windows = (
+                        args.s3a_collapse_mitigate_cooldown_windows
+                    )
+                    collapse_mitigation_trigger_count += 1
+                    mitigation_triggered = 1.0
                 if collapse_alarm > 0 and rank == 0:
                     logger.warning(
                         "S3A collapse alarm triggered: "
@@ -2064,7 +2166,10 @@ def main(args):
                         f"utility_self_ema={avg_utility_self_ema:.6f}, "
                         f"probes={int(global_probe_count)}, "
                         f"self_probes={int(global_self_probe_count)}, "
-                        f"windows={collapse_alarm_windows}"
+                        f"windows={collapse_alarm_windows}, "
+                        f"mitigation_active={mitigation_active_windows}, "
+                        f"mitigation_cooldown={collapse_mitigation_cooldown_windows}, "
+                        f"mitigation_triggered={int(mitigation_triggered)}"
                     )
 
                 logger.info(
@@ -2093,6 +2198,8 @@ def main(args):
                     f"ProbeN={int(global_probe_count)}  "
                     f"SelfProbeN={int(global_self_probe_count)}  "
                     f"alarm={collapse_alarm:.0f}  "
+                    f"mitigate={mitigation_triggered:.0f}  "
+                    f"mitigateW={mitigation_active_windows}  "
                     f"eff_λ={args.s3a_lambda * avg_phase_w:.6f}  "
                     f"Steps/s={steps_per_sec:.2f}"
                 )
@@ -2127,6 +2234,14 @@ def main(args):
                         "collapse_window_score": float(avg_collapse_alarm),
                         "collapse_alarm": float(collapse_alarm),
                         "collapse_alarm_windows": int(collapse_alarm_windows),
+                        "collapse_mitigation_active_windows": int(mitigation_active_windows),
+                        "collapse_mitigation_cooldown_windows": int(
+                            collapse_mitigation_cooldown_windows
+                        ),
+                        "collapse_mitigation_triggered": float(mitigation_triggered),
+                        "collapse_mitigation_trigger_count": int(
+                            collapse_mitigation_trigger_count
+                        ),
                         "alpha_dino_min_layer": float(avg_alpha_dino_min_layer),
                         "alpha_dino_max_layer": float(avg_alpha_dino_max_layer),
                         "effective_lambda": float(args.s3a_lambda * avg_phase_w),
@@ -2137,6 +2252,12 @@ def main(args):
                         metric_row[key] = float(avg_alpha_dino_layers[layer_pos])
                     with open(metrics_jsonl_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(metric_row, ensure_ascii=True) + "\n")
+
+                if args.s3a and args.s3a_use_ema_source:
+                    if mitigation_triggered <= 0:
+                        if collapse_mitigation_cooldown_windows > 0:
+                            collapse_mitigation_cooldown_windows -= 1
+                        s3a_head.module.tick_self_mitigation_window()
 
                 running_loss = 0.0
                 running_loss_diff = 0.0
@@ -2184,6 +2305,12 @@ def main(args):
                         rng_states=rng_states,
                         s3a_runtime_state={
                             "collapse_alarm_windows": int(collapse_alarm_windows),
+                            "collapse_mitigation_cooldown_windows": int(
+                                collapse_mitigation_cooldown_windows
+                            ),
+                            "collapse_mitigation_trigger_count": int(
+                                collapse_mitigation_trigger_count
+                            ),
                         },
                     )
                     logger.info(
@@ -2207,6 +2334,12 @@ def main(args):
                         rng_states=rng_states,
                         s3a_runtime_state={
                             "collapse_alarm_windows": int(collapse_alarm_windows),
+                            "collapse_mitigation_cooldown_windows": int(
+                                collapse_mitigation_cooldown_windows
+                            ),
+                            "collapse_mitigation_trigger_count": int(
+                                collapse_mitigation_trigger_count
+                            ),
                         },
                     )
                     logger.info(
@@ -2233,6 +2366,12 @@ def main(args):
             rng_states=rng_states,
             s3a_runtime_state={
                 "collapse_alarm_windows": int(collapse_alarm_windows),
+                "collapse_mitigation_cooldown_windows": int(
+                    collapse_mitigation_cooldown_windows
+                ),
+                "collapse_mitigation_trigger_count": int(
+                    collapse_mitigation_trigger_count
+                ),
             },
         )
         logger.info(
@@ -2477,7 +2616,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--s3a-collapse-margin",
         type=float,
         default=0.01,
-        help="Collapse alarm margin used with loss_fused + margin < loss_self_only.",
+        help="Collapse alarm margin used with loss_fused_probe + margin < loss_self_only.",
     )
     parser.add_argument(
         "--s3a-collapse-utility-threshold",
@@ -2490,6 +2629,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Consecutive log windows required before emitting collapse alarm.",
+    )
+    parser.add_argument(
+        "--s3a-collapse-auto-mitigate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable automatic temporary self-source shutdown when collapse alarm persists.",
+    )
+    parser.add_argument(
+        "--s3a-collapse-mitigate-windows",
+        type=int,
+        default=3,
+        help="Number of log windows to force self source off after a collapse alarm trigger.",
+    )
+    parser.add_argument(
+        "--s3a-collapse-mitigate-cooldown-windows",
+        type=int,
+        default=6,
+        help="Cooldown log windows before allowing another auto-mitigation trigger.",
     )
     parser.add_argument(
         "--s3a-probe-every",
@@ -2566,6 +2723,10 @@ def validate_args(args):
             raise ValueError("--s3a-dino-alpha-floor-steps must be >= 0")
         if args.s3a_collapse_windows <= 0:
             raise ValueError("--s3a-collapse-windows must be > 0")
+        if args.s3a_collapse_mitigate_windows <= 0:
+            raise ValueError("--s3a-collapse-mitigate-windows must be > 0")
+        if args.s3a_collapse_mitigate_cooldown_windows < 0:
+            raise ValueError("--s3a-collapse-mitigate-cooldown-windows must be >= 0")
         if args.s3a_collapse_utility_threshold < 0:
             raise ValueError("--s3a-collapse-utility-threshold must be >= 0")
         if args.s3a_probe_every <= 0:

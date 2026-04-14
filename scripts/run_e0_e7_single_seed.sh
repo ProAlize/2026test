@@ -40,7 +40,17 @@ S3A_PROBE_EVERY="${S3A_PROBE_EVERY:-10}"
 S3A_UTILITY_PROBE_MODE="${S3A_UTILITY_PROBE_MODE:-uniform}"
 S3A_GATE_PATIENCE="${S3A_GATE_PATIENCE:-500}"
 S3A_GATE_REOPEN_PATIENCE="${S3A_GATE_REOPEN_PATIENCE:-200}"
+S3A_GATE_UTILITY_OFF_THRESHOLD="${S3A_GATE_UTILITY_OFF_THRESHOLD:-0.002}"
+S3A_GATE_UTILITY_ON_THRESHOLD="${S3A_GATE_UTILITY_ON_THRESHOLD:-0.005}"
+S3A_GATE_UTILITY_EMA_MOMENTUM="${S3A_GATE_UTILITY_EMA_MOMENTUM:-0.9}"
 S3A_COLLAPSE_UTILITY_THRESHOLD="${S3A_COLLAPSE_UTILITY_THRESHOLD:-0.0}"
+S3A_COLLAPSE_ALPHA_THRESHOLD="${S3A_COLLAPSE_ALPHA_THRESHOLD:-0.05}"
+S3A_COLLAPSE_SELF_THRESHOLD="${S3A_COLLAPSE_SELF_THRESHOLD:-0.90}"
+S3A_COLLAPSE_MARGIN="${S3A_COLLAPSE_MARGIN:-0.01}"
+S3A_COLLAPSE_WINDOWS="${S3A_COLLAPSE_WINDOWS:-3}"
+S3A_COLLAPSE_AUTO_MITIGATE="${S3A_COLLAPSE_AUTO_MITIGATE:-1}"
+S3A_COLLAPSE_MITIGATE_WINDOWS="${S3A_COLLAPSE_MITIGATE_WINDOWS:-3}"
+S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS="${S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS:-6}"
 
 # Execution controls.
 DRY_RUN="${DRY_RUN:-0}"
@@ -158,6 +168,10 @@ print_header() {
     echo "S3A alpha floor  : $S3A_DINO_ALPHA_FLOOR (steps=$S3A_DINO_ALPHA_FLOOR_STEPS)"
     echo "S3A probe        : every $S3A_PROBE_EVERY, mode=$S3A_UTILITY_PROBE_MODE"
     echo "S3A gate patience: off=$S3A_GATE_PATIENCE, reopen=$S3A_GATE_REOPEN_PATIENCE"
+    echo "S3A gate utility : off=$S3A_GATE_UTILITY_OFF_THRESHOLD, on=$S3A_GATE_UTILITY_ON_THRESHOLD"
+    echo "S3A gate EMA mom : $S3A_GATE_UTILITY_EMA_MOMENTUM"
+    echo "S3A collapse     : alpha<$S3A_COLLAPSE_ALPHA_THRESHOLD, self>$S3A_COLLAPSE_SELF_THRESHOLD, u>$S3A_COLLAPSE_UTILITY_THRESHOLD, margin=$S3A_COLLAPSE_MARGIN, windows=$S3A_COLLAPSE_WINDOWS"
+    echo "S3A mitigate     : auto=$S3A_COLLAPSE_AUTO_MITIGATE, hold=$S3A_COLLAPSE_MITIGATE_WINDOWS, cooldown=$S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS"
     echo "Model depth      : $MODEL_DEPTH"
     echo "Single tap idx   : $L_SINGLE"
     echo "Late-4 tap idx   : $L_LATE4"
@@ -242,12 +256,16 @@ run_s3a() {
     local diff_schedule="$7"
     local ema_flag="--no-s3a-use-ema-source"
     local gate_flag="--no-s3a-enable-selective-gate"
+    local auto_mitigate_flag="--no-s3a-collapse-auto-mitigate"
 
     if [[ "$use_ema_source" == "1" ]]; then
         ema_flag="--s3a-use-ema-source"
     fi
     if [[ "$use_gate" == "1" ]]; then
         gate_flag="--s3a-enable-selective-gate"
+    fi
+    if [[ "$S3A_COLLAPSE_AUTO_MITIGATE" == "1" ]]; then
+        auto_mitigate_flag="--s3a-collapse-auto-mitigate"
     fi
 
     run_cmd "$exp_name" \
@@ -286,8 +304,18 @@ run_s3a() {
         --s3a-utility-probe-mode "$S3A_UTILITY_PROBE_MODE" \
         --s3a-gate-patience "$S3A_GATE_PATIENCE" \
         --s3a-gate-reopen-patience "$S3A_GATE_REOPEN_PATIENCE" \
+        --s3a-gate-utility-off-threshold "$S3A_GATE_UTILITY_OFF_THRESHOLD" \
+        --s3a-gate-utility-on-threshold "$S3A_GATE_UTILITY_ON_THRESHOLD" \
+        --s3a-gate-utility-ema-momentum "$S3A_GATE_UTILITY_EMA_MOMENTUM" \
+        --s3a-collapse-alpha-threshold "$S3A_COLLAPSE_ALPHA_THRESHOLD" \
+        --s3a-collapse-self-threshold "$S3A_COLLAPSE_SELF_THRESHOLD" \
+        --s3a-collapse-margin "$S3A_COLLAPSE_MARGIN" \
+        --s3a-collapse-windows "$S3A_COLLAPSE_WINDOWS" \
         --s3a-collapse-utility-threshold "$S3A_COLLAPSE_UTILITY_THRESHOLD" \
+        --s3a-collapse-mitigate-windows "$S3A_COLLAPSE_MITIGATE_WINDOWS" \
+        --s3a-collapse-mitigate-cooldown-windows "$S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS" \
         --no-s3a-trainable-ema-adapters \
+        "$auto_mitigate_flag" \
         "$ema_flag" \
         "$gate_flag" \
         --dinov2-repo-dir "$DINOV2_REPO_DIR" \

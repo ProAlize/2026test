@@ -43,9 +43,20 @@ S3A_PROBE_EVERY="${S3A_PROBE_EVERY:-10}"
 S3A_UTILITY_PROBE_MODE="${S3A_UTILITY_PROBE_MODE:-uniform}"
 S3A_GATE_PATIENCE="${S3A_GATE_PATIENCE:-500}"
 S3A_GATE_REOPEN_PATIENCE="${S3A_GATE_REOPEN_PATIENCE:-200}"
+S3A_GATE_UTILITY_OFF_THRESHOLD="${S3A_GATE_UTILITY_OFF_THRESHOLD:-0.002}"
+S3A_GATE_UTILITY_ON_THRESHOLD="${S3A_GATE_UTILITY_ON_THRESHOLD:-0.005}"
+S3A_GATE_UTILITY_EMA_MOMENTUM="${S3A_GATE_UTILITY_EMA_MOMENTUM:-0.9}"
+S3A_COLLAPSE_ALPHA_THRESHOLD="${S3A_COLLAPSE_ALPHA_THRESHOLD:-0.05}"
+S3A_COLLAPSE_SELF_THRESHOLD="${S3A_COLLAPSE_SELF_THRESHOLD:-0.90}"
+S3A_COLLAPSE_MARGIN="${S3A_COLLAPSE_MARGIN:-0.01}"
+S3A_COLLAPSE_WINDOWS="${S3A_COLLAPSE_WINDOWS:-3}"
 S3A_COLLAPSE_UTILITY_THRESHOLD="${S3A_COLLAPSE_UTILITY_THRESHOLD:-0.0}"
+S3A_COLLAPSE_AUTO_MITIGATE="${S3A_COLLAPSE_AUTO_MITIGATE:-1}"
+S3A_COLLAPSE_MITIGATE_WINDOWS="${S3A_COLLAPSE_MITIGATE_WINDOWS:-3}"
+S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS="${S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS:-6}"
 S3A_TRAINABLE_EMA_ADAPTERS="${S3A_TRAINABLE_EMA_ADAPTERS:-0}"
 RESUME_CKPT="${RESUME_CKPT:-}"
+ALLOW_MISSING_MANIFEST="${ALLOW_MISSING_MANIFEST:-0}"
 
 if [[ ! -x "$TORCHRUN_BIN" ]]; then
     echo "[ERROR] torchrun not found: $TORCHRUN_BIN" >&2; exit 1
@@ -132,6 +143,10 @@ echo "DINO alpha floor : $S3A_DINO_ALPHA_FLOOR (steps=$S3A_DINO_ALPHA_FLOOR_STEP
 echo "Probe every      : $S3A_PROBE_EVERY"
 echo "Probe mode       : $S3A_UTILITY_PROBE_MODE"
 echo "Gate patience    : off=$S3A_GATE_PATIENCE, reopen=$S3A_GATE_REOPEN_PATIENCE"
+echo "Gate utility     : off=$S3A_GATE_UTILITY_OFF_THRESHOLD, on=$S3A_GATE_UTILITY_ON_THRESHOLD"
+echo "Gate EMA mom     : $S3A_GATE_UTILITY_EMA_MOMENTUM"
+echo "Collapse         : alpha<$S3A_COLLAPSE_ALPHA_THRESHOLD, self>$S3A_COLLAPSE_SELF_THRESHOLD, u>$S3A_COLLAPSE_UTILITY_THRESHOLD, margin=$S3A_COLLAPSE_MARGIN, windows=$S3A_COLLAPSE_WINDOWS"
+echo "Mitigation       : auto=$S3A_COLLAPSE_AUTO_MITIGATE, hold=$S3A_COLLAPSE_MITIGATE_WINDOWS, cooldown=$S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS"
 echo "Train EMA adapter: $S3A_TRAINABLE_EMA_ADAPTERS"
 echo "DINOv2 repo      : $DINOV2_REPO_DIR"
 echo "DINOv2 weight    : $DINOV2_WEIGHT_PATH"
@@ -147,10 +162,18 @@ fi
 if [[ -n "$RESUME_CKPT" ]]; then
     OPTIONAL_ARGS+=(--resume "$RESUME_CKPT")
 fi
+if [[ "$ALLOW_MISSING_MANIFEST" == "1" ]]; then
+    OPTIONAL_ARGS+=(--allow-missing-manifest)
+fi
 if [[ "$S3A_TRAINABLE_EMA_ADAPTERS" == "1" ]]; then
     OPTIONAL_ARGS+=(--s3a-trainable-ema-adapters)
 else
     OPTIONAL_ARGS+=(--no-s3a-trainable-ema-adapters)
+fi
+if [[ "$S3A_COLLAPSE_AUTO_MITIGATE" == "1" ]]; then
+    OPTIONAL_ARGS+=(--s3a-collapse-auto-mitigate)
+else
+    OPTIONAL_ARGS+=(--no-s3a-collapse-auto-mitigate)
 fi
 
 env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
@@ -188,7 +211,16 @@ env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         --s3a-utility-probe-mode "$S3A_UTILITY_PROBE_MODE" \
         --s3a-gate-patience "$S3A_GATE_PATIENCE" \
         --s3a-gate-reopen-patience "$S3A_GATE_REOPEN_PATIENCE" \
+        --s3a-gate-utility-off-threshold "$S3A_GATE_UTILITY_OFF_THRESHOLD" \
+        --s3a-gate-utility-on-threshold "$S3A_GATE_UTILITY_ON_THRESHOLD" \
+        --s3a-gate-utility-ema-momentum "$S3A_GATE_UTILITY_EMA_MOMENTUM" \
+        --s3a-collapse-alpha-threshold "$S3A_COLLAPSE_ALPHA_THRESHOLD" \
+        --s3a-collapse-self-threshold "$S3A_COLLAPSE_SELF_THRESHOLD" \
+        --s3a-collapse-margin "$S3A_COLLAPSE_MARGIN" \
+        --s3a-collapse-windows "$S3A_COLLAPSE_WINDOWS" \
         --s3a-collapse-utility-threshold "$S3A_COLLAPSE_UTILITY_THRESHOLD" \
+        --s3a-collapse-mitigate-windows "$S3A_COLLAPSE_MITIGATE_WINDOWS" \
+        --s3a-collapse-mitigate-cooldown-windows "$S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS" \
         --dinov2-repo-dir "$DINOV2_REPO_DIR" \
         --dinov2-weight-path "$DINOV2_WEIGHT_PATH" \
         "${OPTIONAL_ARGS[@]}" \
