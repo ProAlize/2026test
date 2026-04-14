@@ -36,8 +36,10 @@ ALIGN_LAMBDA="${ALIGN_LAMBDA:-0.1}"
 S3A_SELF_WARMUP_STEPS="${S3A_SELF_WARMUP_STEPS:-5000}"
 S3A_DINO_ALPHA_FLOOR="${S3A_DINO_ALPHA_FLOOR:-0.1}"
 S3A_DINO_ALPHA_FLOOR_STEPS="${S3A_DINO_ALPHA_FLOOR_STEPS:-8000}"
+S3A_PROTECT_SOURCE0_MIN_ALPHA="${S3A_PROTECT_SOURCE0_MIN_ALPHA:-0.05}"
 S3A_PROBE_EVERY="${S3A_PROBE_EVERY:-10}"
-S3A_UTILITY_PROBE_MODE="${S3A_UTILITY_PROBE_MODE:-uniform}"
+S3A_UTILITY_PROBE_MODE="${S3A_UTILITY_PROBE_MODE:-policy_loo}"
+S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR="${S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR:-0.05}"
 S3A_GATE_PATIENCE="${S3A_GATE_PATIENCE:-500}"
 S3A_GATE_REOPEN_PATIENCE="${S3A_GATE_REOPEN_PATIENCE:-200}"
 S3A_GATE_UTILITY_OFF_THRESHOLD="${S3A_GATE_UTILITY_OFF_THRESHOLD:-0.002}"
@@ -166,7 +168,9 @@ print_header() {
     echo "Log every        : $LOG_EVERY"
     echo "S3A warmup       : $S3A_SELF_WARMUP_STEPS"
     echo "S3A alpha floor  : $S3A_DINO_ALPHA_FLOOR (steps=$S3A_DINO_ALPHA_FLOOR_STEPS)"
-    echo "S3A probe        : every $S3A_PROBE_EVERY, mode=$S3A_UTILITY_PROBE_MODE"
+    echo "S3A alpha min    : $S3A_PROTECT_SOURCE0_MIN_ALPHA"
+    echo "S3A probe        : every $S3A_PROBE_EVERY, estimator=$S3A_UTILITY_PROBE_MODE"
+    echo "S3A reopen αfl   : $S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR (auto->0 when --no-s3a-use-ema-source)"
     echo "S3A gate patience: off=$S3A_GATE_PATIENCE, reopen=$S3A_GATE_REOPEN_PATIENCE"
     echo "S3A gate utility : off=$S3A_GATE_UTILITY_OFF_THRESHOLD, on=$S3A_GATE_UTILITY_ON_THRESHOLD"
     echo "S3A gate EMA mom : $S3A_GATE_UTILITY_EMA_MOMENTUM"
@@ -258,7 +262,14 @@ run_s3a() {
     local gate_flag="--no-s3a-enable-selective-gate"
     local auto_mitigate_flag="--no-s3a-collapse-auto-mitigate"
     local floor_tag="${S3A_DINO_ALPHA_FLOOR//./p}"
-    local contract_suffix="w${S3A_SELF_WARMUP_STEPS}_f${floor_tag}_fs${S3A_DINO_ALPHA_FLOOR_STEPS}_p${S3A_PROBE_EVERY}_cw${S3A_COLLAPSE_WINDOWS}_m${S3A_COLLAPSE_AUTO_MITIGATE}"
+    local floor_min_tag="${S3A_PROTECT_SOURCE0_MIN_ALPHA//./p}"
+    local reopen_probe_alpha_effective="$S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR"
+    if [[ "$use_ema_source" != "1" ]]; then
+        reopen_probe_alpha_effective="0.0"
+    fi
+    local reopen_probe_alpha_tag="${reopen_probe_alpha_effective//./p}"
+    local utility_tag="${S3A_UTILITY_PROBE_MODE//[^a-zA-Z0-9]/_}"
+    local contract_suffix="w${S3A_SELF_WARMUP_STEPS}_f${floor_tag}_fmin${floor_min_tag}_fs${S3A_DINO_ALPHA_FLOOR_STEPS}_p${S3A_PROBE_EVERY}_u${utility_tag}_rp${reopen_probe_alpha_tag}_cw${S3A_COLLAPSE_WINDOWS}_m${S3A_COLLAPSE_AUTO_MITIGATE}"
     local exp_name_with_contract="${exp_name}__${contract_suffix}"
 
     if [[ "$use_ema_source" == "1" ]]; then
@@ -303,8 +314,10 @@ run_s3a() {
         --s3a-self-warmup-steps "$S3A_SELF_WARMUP_STEPS" \
         --s3a-dino-alpha-floor "$S3A_DINO_ALPHA_FLOOR" \
         --s3a-dino-alpha-floor-steps "$S3A_DINO_ALPHA_FLOOR_STEPS" \
+        --s3a-protect-source0-min-alpha "$S3A_PROTECT_SOURCE0_MIN_ALPHA" \
         --s3a-probe-every "$S3A_PROBE_EVERY" \
         --s3a-utility-probe-mode "$S3A_UTILITY_PROBE_MODE" \
+        --s3a-gate-reopen-probe-alpha-floor "$reopen_probe_alpha_effective" \
         --s3a-gate-patience "$S3A_GATE_PATIENCE" \
         --s3a-gate-reopen-patience "$S3A_GATE_REOPEN_PATIENCE" \
         --s3a-gate-utility-off-threshold "$S3A_GATE_UTILITY_OFF_THRESHOLD" \

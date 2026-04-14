@@ -48,6 +48,9 @@ from model_sasa import DiT_models
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 
+CHECKPOINT_FORMAT_VERSION = 5
+METRICS_SCHEMA_VERSION = 2
+
 
 #################################################################################
 #                             Training Helper Functions                         #
@@ -658,8 +661,20 @@ class S3AAlignmentHead(nn.Module):
             torch.zeros(len(self.layer_indices), self.num_sources, dtype=torch.long),
         )
         self.register_buffer(
-            "source_utility_ema",
+            "source_utility_active_ema",
             torch.zeros(len(self.layer_indices), self.num_sources, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "source_utility_inactive_ema",
+            torch.zeros(len(self.layer_indices), self.num_sources, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "source_utility_active_initialized",
+            torch.zeros(len(self.layer_indices), self.num_sources, dtype=torch.bool),
+        )
+        self.register_buffer(
+            "source_utility_inactive_initialized",
+            torch.zeros(len(self.layer_indices), self.num_sources, dtype=torch.bool),
         )
         self.register_buffer(
             "self_mitigation_windows_remaining",
@@ -675,6 +690,10 @@ class S3AAlignmentHead(nn.Module):
             self.source_gate_mask[:, 1] = 0.0
             self.source_inactive_steps[:, 1] = 0
             self.source_recover_steps[:, 1] = 0
+            self.source_utility_active_ema[:, 1] = 0.0
+            self.source_utility_inactive_ema[:, 1] = 0.0
+            self.source_utility_active_initialized[:, 1] = False
+            self.source_utility_inactive_initialized[:, 1] = False
 
     @torch.no_grad()
     def tick_self_mitigation_window(self) -> int:
@@ -691,7 +710,10 @@ class S3AAlignmentHead(nn.Module):
     def update_gate_state(
         self,
         layer_slot: int,
-        utility_mean: torch.Tensor,
+        utility_active_mean: torch.Tensor,
+        utility_inactive_mean: torch.Tensor,
+        utility_active_valid: torch.Tensor,
+        utility_inactive_valid: torch.Tensor,
         source_ready: torch.Tensor,
         utility_off_threshold: float,
         utility_on_threshold: float,
@@ -703,10 +725,28 @@ class S3AAlignmentHead(nn.Module):
         # source0 is DINO, kept always available by default. Source1 (self) is
         # gated by utility rather than router confidence.
         for src_idx in range(self.num_sources):
-            if protect_source0 and src_idx == 0:
-                self.source_gate_mask[layer_slot, src_idx] = 1.0
+            prev_gate_on = bool(self.source_gate_mask[layer_slot, src_idx].item() > 0.5)
+
+            def _reset_gate_counters() -> None:
                 self.source_inactive_steps[layer_slot, src_idx] = 0
                 self.source_recover_steps[layer_slot, src_idx] = 0
+
+            def _invalidate_active_ema() -> None:
+                self.source_utility_active_ema[layer_slot, src_idx] = 0.0
+                self.source_utility_active_initialized[layer_slot, src_idx] = False
+
+            def _invalidate_inactive_ema() -> None:
+                self.source_utility_inactive_ema[layer_slot, src_idx] = 0.0
+                self.source_utility_inactive_initialized[layer_slot, src_idx] = False
+
+            def _hard_reset_all() -> None:
+                _reset_gate_counters()
+                _invalidate_active_ema()
+                _invalidate_inactive_ema()
+
+            if protect_source0 and src_idx == 0:
+                self.source_gate_mask[layer_slot, src_idx] = 1.0
+                _reset_gate_counters()
                 continue
 
             if (
@@ -714,41 +754,80 @@ class S3AAlignmentHead(nn.Module):
                 and int(self.self_mitigation_windows_remaining.item()) > 0
             ):
                 self.source_gate_mask[layer_slot, src_idx] = 0.0
-                self.source_inactive_steps[layer_slot, src_idx] = 0
-                self.source_recover_steps[layer_slot, src_idx] = 0
+                _hard_reset_all()
                 continue
 
             if source_ready[src_idx] <= 0:
                 self.source_gate_mask[layer_slot, src_idx] = 0.0
-                self.source_inactive_steps[layer_slot, src_idx] = 0
-                self.source_recover_steps[layer_slot, src_idx] = 0
-                self.source_utility_ema[layer_slot, src_idx] = 0.0
+                _hard_reset_all()
                 continue
 
-            prev_ema = self.source_utility_ema[layer_slot, src_idx]
-            ema = (
-                utility_ema_momentum * prev_ema
-                + (1.0 - utility_ema_momentum) * utility_mean[src_idx]
-            )
-            self.source_utility_ema[layer_slot, src_idx] = ema
+            gate_on = prev_gate_on
+            if gate_on:
+                if utility_active_valid[src_idx] > 0:
+                    if not bool(self.source_utility_active_initialized[layer_slot, src_idx].item()):
+                        active_ema = utility_active_mean[src_idx]
+                        self.source_utility_active_initialized[layer_slot, src_idx] = True
+                    else:
+                        prev_active_ema = self.source_utility_active_ema[layer_slot, src_idx]
+                        active_ema = (
+                            utility_ema_momentum * prev_active_ema
+                            + (1.0 - utility_ema_momentum) * utility_active_mean[src_idx]
+                        )
+                    self.source_utility_active_ema[layer_slot, src_idx] = active_ema
 
-            if ema < utility_off_threshold:
-                self.source_inactive_steps[layer_slot, src_idx] += 1
-            else:
-                self.source_inactive_steps[layer_slot, src_idx] = 0
+                    if active_ema < utility_off_threshold:
+                        self.source_inactive_steps[layer_slot, src_idx] += 1
+                    else:
+                        self.source_inactive_steps[layer_slot, src_idx] = 0
+                else:
+                    self.source_inactive_steps[layer_slot, src_idx] = 0
 
-            if ema > utility_on_threshold:
-                self.source_recover_steps[layer_slot, src_idx] += 1
-            else:
                 self.source_recover_steps[layer_slot, src_idx] = 0
 
-            if self.source_inactive_steps[layer_slot, src_idx] >= patience:
-                self.source_gate_mask[layer_slot, src_idx] = 0.0
+                if (
+                    utility_active_valid[src_idx] > 0
+                    and self.source_inactive_steps[layer_slot, src_idx] >= patience
+                ):
+                    gate_on = False
+            else:
+                if utility_inactive_valid[src_idx] > 0:
+                    if not bool(self.source_utility_inactive_initialized[layer_slot, src_idx].item()):
+                        inactive_ema = utility_inactive_mean[src_idx]
+                        self.source_utility_inactive_initialized[layer_slot, src_idx] = True
+                    else:
+                        prev_inactive_ema = self.source_utility_inactive_ema[layer_slot, src_idx]
+                        inactive_ema = (
+                            utility_ema_momentum * prev_inactive_ema
+                            + (1.0 - utility_ema_momentum) * utility_inactive_mean[src_idx]
+                        )
+                    self.source_utility_inactive_ema[layer_slot, src_idx] = inactive_ema
 
-            # Re-open source if utility recovers with hysteresis.
-            if self.source_recover_steps[layer_slot, src_idx] >= reopen_patience:
-                self.source_gate_mask[layer_slot, src_idx] = 1.0
+                    if inactive_ema > utility_on_threshold:
+                        self.source_recover_steps[layer_slot, src_idx] += 1
+                    else:
+                        self.source_recover_steps[layer_slot, src_idx] = 0
+                else:
+                    self.source_recover_steps[layer_slot, src_idx] = 0
+
                 self.source_inactive_steps[layer_slot, src_idx] = 0
+
+                if (
+                    utility_inactive_valid[src_idx] > 0
+                    and self.source_recover_steps[layer_slot, src_idx] >= reopen_patience
+                ):
+                    gate_on = True
+
+            if gate_on != prev_gate_on:
+                _reset_gate_counters()
+                # Entered-regime invalidate + first-sample seeding avoids
+                # mixed-estimand carryover and zero-start bias.
+                if gate_on:
+                    _invalidate_active_ema()
+                else:
+                    _invalidate_inactive_ema()
+
+            self.source_gate_mask[layer_slot, src_idx] = 1.0 if gate_on else 0.0
 
     def get_source_mask(
         self,
@@ -771,6 +850,9 @@ class S3AAlignmentHead(nn.Module):
 
         if enable_selective_gate:
             mask = mask * self.source_gate_mask[layer_slot]
+        if self.num_sources > 0 and source_ready[0] > 0:
+            # Keep source0 available even if legacy gate state was stale on resume.
+            mask[0] = source_ready[0]
 
         if mask.sum() <= 0:
             mask[0] = 1.0
@@ -869,7 +951,10 @@ def compute_s3a_alignment_loss(
     loss_self_only_acc = 0.0
     utility_dino_acc = 0.0
     utility_self_acc = 0.0
-    utility_self_ema_acc = 0.0
+    utility_self_active_ema_acc = 0.0
+    utility_self_inactive_ema_acc = 0.0
+    utility_self_active_ema_count = 0
+    utility_self_inactive_ema_count = 0
     utility_probe_count = 0
     dino_only_count = 0
     self_only_count = 0
@@ -939,127 +1024,241 @@ def compute_s3a_alignment_loss(
             or (current_step % args.s3a_probe_every) == 0
         )
 
-        def _build_alpha(mask_vec: torch.Tensor) -> torch.Tensor:
-            alpha_local = raw_alpha * mask_vec.unsqueeze(0)
-            alpha_local = alpha_local / alpha_local.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        def _apply_joint_min_alpha(
+            alpha_local: torch.Tensor,
+            min_alpha_by_source: Dict[int, float],
+        ) -> torch.Tensor:
+            if alpha_local.shape[-1] <= 1 or not min_alpha_by_source:
+                return alpha_local
+
+            floor = torch.zeros(alpha_local.shape[-1], device=alpha_local.device, dtype=alpha_local.dtype)
+            for src_idx, min_alpha in min_alpha_by_source.items():
+                if min_alpha <= 0:
+                    continue
+                if src_idx < 0 or src_idx >= alpha_local.shape[-1]:
+                    continue
+                floor[src_idx] = max(floor[src_idx], float(min_alpha))
+
+            floor_sum = float(floor.sum().item())
+            if floor_sum <= 0.0:
+                return alpha_local
+            if floor_sum >= 1.0:
+                out = floor / floor.sum().clamp(min=1e-8)
+                return out.unsqueeze(0).expand(alpha_local.shape[0], -1)
+
+            floor_batch = floor.unsqueeze(0).expand(alpha_local.shape[0], -1)
+            remain = 1.0 - floor_sum
+            residual = (alpha_local - floor_batch).clamp(min=0.0)
+            residual_sum = residual.sum(dim=-1, keepdim=True)
+            fallback = alpha_local / alpha_local.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            residual_norm = torch.where(
+                residual_sum > 0,
+                residual / residual_sum.clamp(min=1e-8),
+                fallback,
+            )
+            out = floor_batch + residual_norm * remain
+            out = out / out.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            return out
+
+        def _compute_dino_floor(mask_vec: torch.Tensor) -> float:
+            if not (s3a_head.num_sources > 1 and mask_vec[0] > 0):
+                return 0.0
+            dino_floor = 0.0
             if (
-                s3a_head.num_sources > 1
-                and mask_vec[0] > 0
-                and args.s3a_dino_alpha_floor > 0
+                args.s3a_dino_alpha_floor > 0
                 and args.s3a_dino_alpha_floor_steps > 0
                 and current_step < args.s3a_dino_alpha_floor_steps
             ):
                 floor_ratio = 1.0 - (current_step / max(1, args.s3a_dino_alpha_floor_steps))
-                alpha_floor = args.s3a_dino_alpha_floor * max(0.0, floor_ratio)
-                alpha_dino = alpha_local[:, 0].clamp(min=alpha_floor)
-                other = alpha_local[:, 1:]
-                other = other / other.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-                alpha_local = torch.cat(
-                    [alpha_dino.unsqueeze(-1), (1.0 - alpha_dino).unsqueeze(-1) * other],
-                    dim=-1,
-                )
+                dino_floor = max(dino_floor, args.s3a_dino_alpha_floor * max(0.0, floor_ratio))
+            if args.s3a_protect_source0_min_alpha > 0:
+                dino_floor = max(dino_floor, args.s3a_protect_source0_min_alpha)
+            return dino_floor
+
+        def _build_alpha(
+            mask_vec: torch.Tensor,
+            extra_min_alpha_by_source: Optional[Dict[int, float]] = None,
+        ) -> torch.Tensor:
+            alpha_local = raw_alpha * mask_vec.unsqueeze(0)
+            alpha_local = alpha_local / alpha_local.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            min_alpha_by_source: Dict[int, float] = {}
+            dino_floor = _compute_dino_floor(mask_vec)
+            if dino_floor > 0:
+                min_alpha_by_source[0] = dino_floor
+            if extra_min_alpha_by_source:
+                for src_idx, min_alpha in extra_min_alpha_by_source.items():
+                    if min_alpha <= 0:
+                        continue
+                    prev = min_alpha_by_source.get(src_idx, 0.0)
+                    min_alpha_by_source[src_idx] = max(prev, float(min_alpha))
+            if min_alpha_by_source:
+                alpha_local = _apply_joint_min_alpha(alpha_local, min_alpha_by_source)
             return alpha_local
 
         alpha = _build_alpha(source_mask)
-
-        def _build_utility_probe_alpha(mask_vec: torch.Tensor) -> torch.Tensor:
-            if args.s3a_utility_probe_mode == "raw_alpha":
-                return _build_alpha(mask_vec)
-            alpha_probe_local = mask_vec / mask_vec.sum().clamp(min=1e-8)
-            return alpha_probe_local.unsqueeze(0).expand(raw_alpha.shape[0], -1)
 
         fused = torch.zeros_like(pred)
         for src_idx, src_tokens in enumerate(sources):
             fused = fused + alpha[:, src_idx].view(-1, 1, 1) * src_tokens
 
-        feat_loss_ps = cosine_distance_per_sample(pred, fused)
-        attn_loss_ps = affinity_loss_per_sample(
-            pred,
-            fused,
-            max_tokens=args.s3a_attn_max_tokens,
-        )
-        spatial_loss_ps = spatial_loss_per_sample(pred, fused)
+        def _combined_loss_per_sample(
+            pred_tokens: torch.Tensor,
+            target_tokens: torch.Tensor,
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            feat_ps_local = cosine_distance_per_sample(pred_tokens, target_tokens)
+            attn_ps_local = affinity_loss_per_sample(
+                pred_tokens,
+                target_tokens,
+                max_tokens=args.s3a_attn_max_tokens,
+            )
+            spatial_ps_local = spatial_loss_per_sample(pred_tokens, target_tokens)
+            combined_ps_local = (
+                args.s3a_feat_weight * feat_ps_local
+                + args.s3a_attn_weight * attn_ps_local
+                + args.s3a_spatial_weight * spatial_ps_local
+            )
+            return feat_ps_local, attn_ps_local, spatial_ps_local, combined_ps_local
 
-        combined_ps = (
-            args.s3a_feat_weight * feat_loss_ps
-            + args.s3a_attn_weight * attn_loss_ps
-            + args.s3a_spatial_weight * spatial_loss_ps
+        feat_loss_ps, attn_loss_ps, spatial_loss_ps, combined_ps = _combined_loss_per_sample(
+            pred, fused
         )
 
         dino_layer_loss_mean = 0.0
         self_layer_loss_mean = 0.0
-        fused_probe_loss_mean = 0.0
+        fused_probe_loss_mean = combined_ps.mean().item()
         utility_dino_layer = 0.0
         utility_self_layer = 0.0
+        utility_active_layer = torch.zeros(s3a_head.num_sources, device=device)
+        utility_inactive_layer = torch.zeros(s3a_head.num_sources, device=device)
+        utility_active_valid = torch.zeros(s3a_head.num_sources, device=device)
+        utility_inactive_valid = torch.zeros(s3a_head.num_sources, device=device)
 
         if do_probe:
-            # Probe mask disables selective gate to estimate source utility even
-            # when a source is currently gated off.
-            source_mask_probe = s3a_head.get_source_mask(
-                layer_slot=slot,
-                source_ready=source_ready,
-                current_step=current_step,
-                self_warmup_steps=args.s3a_self_warmup_steps,
-                enable_selective_gate=False,
-            )
-            alpha_probe = _build_utility_probe_alpha(source_mask_probe)
             with torch.no_grad():
                 pred_probe = pred.detach()
-                fused_probe = torch.zeros_like(pred_probe)
-                for src_idx, src_tokens in enumerate(sources):
-                    fused_probe = fused_probe + alpha_probe[:, src_idx].view(-1, 1, 1) * src_tokens
-
-                fused_probe_feat_ps = cosine_distance_per_sample(pred_probe, fused_probe)
-                fused_probe_attn_ps = affinity_loss_per_sample(
-                    pred_probe,
-                    fused_probe,
-                    max_tokens=args.s3a_attn_max_tokens,
-                )
-                fused_probe_spatial_ps = spatial_loss_per_sample(pred_probe, fused_probe)
-                fused_probe_combined_ps = (
-                    args.s3a_feat_weight * fused_probe_feat_ps
-                    + args.s3a_attn_weight * fused_probe_attn_ps
-                    + args.s3a_spatial_weight * fused_probe_spatial_ps
-                )
-                fused_probe_loss_mean = fused_probe_combined_ps.mean().item()
-
-                dino_feat_ps = cosine_distance_per_sample(pred_probe, dino_layer)
-                dino_attn_ps = affinity_loss_per_sample(
-                    pred_probe,
-                    dino_layer,
-                    max_tokens=args.s3a_attn_max_tokens,
-                )
-                dino_spatial_ps = spatial_loss_per_sample(pred_probe, dino_layer)
-                dino_combined_ps = (
-                    args.s3a_feat_weight * dino_feat_ps
-                    + args.s3a_attn_weight * dino_attn_ps
-                    + args.s3a_spatial_weight * dino_spatial_ps
-                )
+                _, _, _, dino_combined_ps = _combined_loss_per_sample(pred_probe, dino_layer)
                 dino_layer_loss_mean = dino_combined_ps.mean().item()
                 dino_only_count += 1
 
-                if s3a_head.num_sources > 1 and source_mask_probe[1] > 0:
+                if s3a_head.num_sources > 1 and source_ready[1] > 0:
                     self_layer = sources[1]
-                    self_feat_ps = cosine_distance_per_sample(pred_probe, self_layer)
-                    self_attn_ps = affinity_loss_per_sample(
-                        pred_probe,
-                        self_layer,
-                        max_tokens=args.s3a_attn_max_tokens,
-                    )
-                    self_spatial_ps = spatial_loss_per_sample(pred_probe, self_layer)
-                    self_combined_ps = (
-                        args.s3a_feat_weight * self_feat_ps
-                        + args.s3a_attn_weight * self_attn_ps
-                        + args.s3a_spatial_weight * self_spatial_ps
-                    )
+                    _, _, _, self_combined_ps = _combined_loss_per_sample(pred_probe, self_layer)
                     self_layer_loss_mean = self_combined_ps.mean().item()
                     self_only_count += 1
 
-                # Utility is defined as "loss without source - full fused loss".
-                # Positive means this source contributes useful signal.
-                utility_self_layer = dino_layer_loss_mean - fused_probe_loss_mean
-                if s3a_head.num_sources > 1 and source_mask_probe[1] > 0:
-                    utility_dino_layer = self_layer_loss_mean - fused_probe_loss_mean
+                if args.s3a_utility_probe_mode == "policy_loo":
+                    # Policy-consistent utility: leave-one-out / add-one under the
+                    # same alpha builder used by training (same router + floor rule).
+                    utility_active_per_source = torch.zeros(s3a_head.num_sources, device=device)
+                    utility_inactive_per_source = torch.zeros(s3a_head.num_sources, device=device)
+                    utility_active_valid_per_source = torch.zeros(
+                        s3a_head.num_sources, device=device
+                    )
+                    utility_inactive_valid_per_source = torch.zeros(
+                        s3a_head.num_sources, device=device
+                    )
+                    alpha_train_probe = _build_alpha(source_mask)
+                    fused_train_probe = torch.zeros_like(pred_probe)
+                    for src_idx, src_tokens in enumerate(sources):
+                        fused_train_probe = (
+                            fused_train_probe
+                            + alpha_train_probe[:, src_idx].view(-1, 1, 1) * src_tokens
+                        )
+                    _, _, _, base_combined_ps = _combined_loss_per_sample(pred_probe, fused_train_probe)
+                    fused_probe_loss_mean = base_combined_ps.mean().item()
+
+                    for src_idx in range(s3a_head.num_sources):
+                        if source_ready[src_idx] <= 0:
+                            continue
+                        if source_mask[src_idx] > 0:
+                            if source_mask.sum().item() <= 1:
+                                continue
+                            cf_mask = source_mask.clone()
+                            cf_mask[src_idx] = 0.0
+                            cf_alpha = _build_alpha(cf_mask)
+                            cf_fused = torch.zeros_like(pred_probe)
+                            for k, src_tokens in enumerate(sources):
+                                cf_fused = cf_fused + cf_alpha[:, k].view(-1, 1, 1) * src_tokens
+                            _, _, _, cf_combined_ps = _combined_loss_per_sample(pred_probe, cf_fused)
+                            utility_active_per_source[src_idx] = (
+                                cf_combined_ps.mean().item() - fused_probe_loss_mean
+                            )
+                            utility_active_valid_per_source[src_idx] = 1.0
+                        else:
+                            # Gate-off recovery signal: test adding this source under
+                            # current policy, without changing optimizer path.
+                            cf_mask = source_mask.clone()
+                            cf_mask[src_idx] = source_ready[src_idx]
+                            if cf_mask.sum().item() <= 1:
+                                continue
+                            cf_alpha = _build_alpha(
+                                cf_mask,
+                                extra_min_alpha_by_source={
+                                    src_idx: args.s3a_gate_reopen_probe_alpha_floor
+                                },
+                            )
+                            cf_fused = torch.zeros_like(pred_probe)
+                            for k, src_tokens in enumerate(sources):
+                                cf_fused = cf_fused + cf_alpha[:, k].view(-1, 1, 1) * src_tokens
+                            _, _, _, cf_combined_ps = _combined_loss_per_sample(pred_probe, cf_fused)
+                            utility_inactive_per_source[src_idx] = (
+                                fused_probe_loss_mean - cf_combined_ps.mean().item()
+                            )
+                            utility_inactive_valid_per_source[src_idx] = 1.0
+
+                    utility_active_layer = utility_active_per_source
+                    utility_inactive_layer = utility_inactive_per_source
+                    utility_active_valid = utility_active_valid_per_source
+                    utility_inactive_valid = utility_inactive_valid_per_source
+                else:
+                    # Legacy utility estimator kept for ablation/backward comparison.
+                    source_mask_probe = s3a_head.get_source_mask(
+                        layer_slot=slot,
+                        source_ready=source_ready,
+                        current_step=current_step,
+                        self_warmup_steps=args.s3a_self_warmup_steps,
+                        enable_selective_gate=False,
+                    )
+                    if args.s3a_utility_probe_mode == "raw_alpha":
+                        alpha_probe = _build_alpha(source_mask_probe)
+                    else:
+                        alpha_probe_local = source_mask_probe / source_mask_probe.sum().clamp(min=1e-8)
+                        alpha_probe = alpha_probe_local.unsqueeze(0).expand(raw_alpha.shape[0], -1)
+                    fused_probe = torch.zeros_like(pred_probe)
+                    for src_idx, src_tokens in enumerate(sources):
+                        fused_probe = fused_probe + alpha_probe[:, src_idx].view(-1, 1, 1) * src_tokens
+                    _, _, _, fused_probe_combined_ps = _combined_loss_per_sample(pred_probe, fused_probe)
+                    fused_probe_loss_mean = fused_probe_combined_ps.mean().item()
+                    utility_self_layer = dino_layer_loss_mean - fused_probe_loss_mean
+                    if s3a_head.num_sources > 1 and source_mask_probe[1] > 0:
+                        utility_dino_layer = self_layer_loss_mean - fused_probe_loss_mean
+
+                    # Legacy mode does not separate on/off estimands; attach
+                    # the scalar utility to whichever side is currently observed.
+                    utility_layer_legacy = torch.zeros(s3a_head.num_sources, device=device)
+                    utility_layer_legacy[0] = utility_dino_layer
+                    if s3a_head.num_sources > 1:
+                        utility_layer_legacy[1] = utility_self_layer
+                    for src_idx in range(s3a_head.num_sources):
+                        if source_ready[src_idx] <= 0:
+                            continue
+                        if source_mask[src_idx] > 0:
+                            utility_active_layer[src_idx] = utility_layer_legacy[src_idx]
+                            utility_active_valid[src_idx] = 1.0
+                        else:
+                            utility_inactive_layer[src_idx] = utility_layer_legacy[src_idx]
+                            utility_inactive_valid[src_idx] = 1.0
+
+                if source_mask[0] > 0 and utility_active_valid[0] > 0:
+                    utility_dino_layer = utility_active_layer[0].item()
+                elif source_mask[0] <= 0 and utility_inactive_valid[0] > 0:
+                    utility_dino_layer = utility_inactive_layer[0].item()
+
+                if s3a_head.num_sources > 1:
+                    if source_mask[1] > 0 and utility_active_valid[1] > 0:
+                        utility_self_layer = utility_active_layer[1].item()
+                    elif source_mask[1] <= 0 and utility_inactive_valid[1] > 0:
+                        utility_self_layer = utility_inactive_layer[1].item()
                 utility_probe_count += 1
 
         sample_weights = diff_weights * (phase_weight * layer_weights[slot])
@@ -1093,7 +1292,14 @@ def compute_s3a_alignment_loss(
             gate_self_acc += source_mask[1].item()
             loss_self_only_acc += self_layer_loss_mean
             if do_probe:
-                utility_self_ema_acc += s3a_head.source_utility_ema[slot, 1].item()
+                if bool(s3a_head.source_utility_active_initialized[slot, 1].item()):
+                    utility_self_active_ema_acc += s3a_head.source_utility_active_ema[slot, 1].item()
+                    utility_self_active_ema_count += 1
+                if bool(s3a_head.source_utility_inactive_initialized[slot, 1].item()):
+                    utility_self_inactive_ema_acc += (
+                        s3a_head.source_utility_inactive_ema[slot, 1].item()
+                    )
+                    utility_self_inactive_ema_count += 1
 
             if (
                 do_probe
@@ -1113,21 +1319,37 @@ def compute_s3a_alignment_loss(
             and do_probe
         ):
             with torch.no_grad():
-                utility_mean = torch.zeros(s3a_head.num_sources, device=device)
-                utility_mean[0] = utility_dino_layer
-                if s3a_head.num_sources > 1:
-                    utility_mean[1] = utility_self_layer
+                utility_active_mean = utility_active_layer.clone()
+                utility_inactive_mean = utility_inactive_layer.clone()
+                utility_active_valid_mean = utility_active_valid.clone()
+                utility_inactive_valid_mean = utility_inactive_valid.clone()
                 ready = source_ready.clone()
                 if dist.is_available() and dist.is_initialized():
-                    dist.all_reduce(utility_mean, op=dist.ReduceOp.SUM)
-                    utility_mean = utility_mean / dist.get_world_size()
+                    dist.all_reduce(utility_active_mean, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(utility_inactive_mean, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(utility_active_valid_mean, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(utility_inactive_valid_mean, op=dist.ReduceOp.SUM)
 
                     dist.all_reduce(ready, op=dist.ReduceOp.SUM)
                     ready = (ready > 0).float()
 
+                utility_active_mean = torch.where(
+                    utility_active_valid_mean > 0,
+                    utility_active_mean / utility_active_valid_mean.clamp(min=1.0),
+                    torch.zeros_like(utility_active_mean),
+                )
+                utility_inactive_mean = torch.where(
+                    utility_inactive_valid_mean > 0,
+                    utility_inactive_mean / utility_inactive_valid_mean.clamp(min=1.0),
+                    torch.zeros_like(utility_inactive_mean),
+                )
+
                 s3a_head.update_gate_state(
                     layer_slot=slot,
-                    utility_mean=utility_mean,
+                    utility_active_mean=utility_active_mean,
+                    utility_inactive_mean=utility_inactive_mean,
+                    utility_active_valid=utility_active_valid_mean,
+                    utility_inactive_valid=utility_inactive_valid_mean,
                     source_ready=ready,
                     utility_off_threshold=args.s3a_gate_utility_off_threshold,
                     utility_on_threshold=args.s3a_gate_utility_on_threshold,
@@ -1157,6 +1379,10 @@ def compute_s3a_alignment_loss(
             "utility_dino": 0.0,
             "utility_self": 0.0,
             "utility_self_ema": 0.0,
+            "utility_self_active_ema": 0.0,
+            "utility_self_inactive_ema": 0.0,
+            "utility_self_active_ema_count": 0.0,
+            "utility_self_inactive_ema_count": 0.0,
             "probe_count": 0.0,
             "self_probe_count": 0.0,
             "collapse_alarm": 0.0,
@@ -1193,10 +1419,22 @@ def compute_s3a_alignment_loss(
         "utility_dino": utility_dino_acc / max(1, utility_probe_count),
         "utility_self": utility_self_acc / max(1, utility_probe_count),
         "utility_self_ema": (
-            utility_self_ema_acc / max(1, utility_probe_count)
+            utility_self_active_ema_acc / max(1, utility_self_active_ema_count)
             if s3a_head.num_sources > 1
             else 0.0
         ),
+        "utility_self_active_ema": (
+            utility_self_active_ema_acc / max(1, utility_self_active_ema_count)
+            if s3a_head.num_sources > 1
+            else 0.0
+        ),
+        "utility_self_inactive_ema": (
+            utility_self_inactive_ema_acc / max(1, utility_self_inactive_ema_count)
+            if s3a_head.num_sources > 1
+            else 0.0
+        ),
+        "utility_self_active_ema_count": float(utility_self_active_ema_count),
+        "utility_self_inactive_ema_count": float(utility_self_inactive_ema_count),
         "probe_count": float(utility_probe_count),
         "self_probe_count": float(self_only_count),
         "collapse_alarm": (
@@ -1304,6 +1542,7 @@ def _validate_resume_contract(
         "s3a_self_warmup_steps",
         "s3a_dino_alpha_floor",
         "s3a_dino_alpha_floor_steps",
+        "s3a_protect_source0_min_alpha",
         "s3a_train_schedule",
         "s3a_schedule_steps",
         "s3a_diff_schedule",
@@ -1311,6 +1550,7 @@ def _validate_resume_contract(
         "s3a_layer_weights",
         "s3a_probe_every",
         "s3a_utility_probe_mode",
+        "s3a_gate_reopen_probe_alpha_floor",
         "s3a_gate_patience",
         "s3a_gate_reopen_patience",
         "s3a_gate_utility_off_threshold",
@@ -1335,12 +1575,22 @@ def _validate_resume_contract(
         "s3a_attn_max_tokens",
         "s3a_max_grad_norm",
     ]
+    backward_compatible_missing_defaults = {
+        # Added after legacy checkpoints; safe to backfill only when
+        # current run still uses legacy-equivalent defaults.
+        "s3a_protect_source0_min_alpha": 0.0,
+        "s3a_gate_reopen_probe_alpha_floor": 0.0,
+    }
     mismatches = []
     missing_keys = []
     for key in keys:
         if not hasattr(current_args, key):
             continue
         if key not in saved_args_dict:
+            if key in backward_compatible_missing_defaults:
+                legacy_default = backward_compatible_missing_defaults[key]
+                if _is_equal_resume_value(getattr(current_args, key), legacy_default):
+                    continue
             missing_keys.append(key)
             continue
         current_val = getattr(current_args, key)
@@ -1351,23 +1601,63 @@ def _validate_resume_contract(
         raise ValueError(
             "Resume contract missing critical keys in checkpoint args: "
             f"{missing_keys[:8]}{' ...' if len(missing_keys) > 8 else ''}. "
-            "Use --allow-legacy-resume-args to bypass (unsafe)."
+            "Missing keys are auto-backfilled only when current values match "
+            "legacy defaults. Use --allow-legacy-resume-args to bypass (unsafe)."
         )
     if mismatches:
+        utility_mode_mismatch = any(k == "s3a_utility_probe_mode" for (k, _, _) in mismatches)
         detail = ", ".join(
             [f"{k}(current={c}, checkpoint={s})" for (k, c, s) in mismatches[:8]]
         )
+        guidance = ""
+        if utility_mode_mismatch:
+            guidance = (
+                " Legacy checkpoints may require explicitly passing "
+                "--s3a-utility-probe-mode to match checkpoint args."
+            )
         raise ValueError(
             "Resume contract mismatch for critical S3A args: "
-            f"{detail}. Refuse to resume with incompatible config."
+            f"{detail}. Refuse to resume with incompatible config.{guidance}"
         )
+
+
+def _reset_selective_gate_runtime_state(
+    target_state: Dict[str, torch.Tensor],
+    expected_state: Dict[str, torch.Tensor],
+) -> List[str]:
+    reset_keys = (
+        "source_gate_mask",
+        "source_inactive_steps",
+        "source_recover_steps",
+        "source_utility_active_ema",
+        "source_utility_inactive_ema",
+        "source_utility_active_initialized",
+        "source_utility_inactive_initialized",
+        "self_mitigation_windows_remaining",
+    )
+    applied: List[str] = []
+    for key in reset_keys:
+        if key in expected_state:
+            target_state[key] = expected_state[key].clone()
+            applied.append(key)
+    return applied
 
 
 def _migrate_legacy_s3a_state(
     loaded_state: Dict[str, torch.Tensor],
     expected_state: Dict[str, torch.Tensor],
-) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+) -> Tuple[Dict[str, torch.Tensor], List[str], List[str]]:
     migrated = dict(loaded_state)
+    migration_notes: List[str] = []
+    legacy_utility_ema = migrated.pop("source_utility_ema", None)
+    if legacy_utility_ema is not None:
+        migration_notes.append("discarded_legacy_source_utility_ema")
+        # Legacy single-track utility semantics are incompatible with the
+        # current selective-gate runtime state; sterilize the full controller.
+        reset_applied = _reset_selective_gate_runtime_state(migrated, expected_state)
+        if reset_applied:
+            migration_notes.append("reset_selective_gate_state_for_legacy_utility_semantics")
+
     missing = [k for k in expected_state.keys() if k not in migrated]
     unexpected = [k for k in migrated.keys() if k not in expected_state]
     if unexpected:
@@ -1380,7 +1670,10 @@ def _migrate_legacy_s3a_state(
         "source_gate_mask",
         "source_inactive_steps",
         "source_recover_steps",
-        "source_utility_ema",
+        "source_utility_active_ema",
+        "source_utility_inactive_ema",
+        "source_utility_active_initialized",
+        "source_utility_inactive_initialized",
         "self_mitigation_windows_remaining",
         "ema_adapters.",
     )
@@ -1393,7 +1686,7 @@ def _migrate_legacy_s3a_state(
 
     for key in missing:
         migrated[key] = expected_state[key]
-    return migrated, missing
+    return migrated, missing, migration_notes
 
 
 def save_checkpoint(
@@ -1409,7 +1702,7 @@ def save_checkpoint(
     s3a_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     checkpoint = {
-        "format_version": 3,
+        "format_version": CHECKPOINT_FORMAT_VERSION,
         "train_steps": train_steps,
         "batches_seen": batches_seen,
         "model_state": model.module.state_dict(),
@@ -1483,17 +1776,21 @@ def load_checkpoint(
                 "S3A checkpoint is missing s3a_head_state/s3a_head while --s3a is enabled."
             )
         expected_state = s3a_head.module.state_dict()
-        if format_version < 3:
-            s3a_state, _ = _migrate_legacy_s3a_state(
+        migration_notes: List[str] = []
+        if format_version < CHECKPOINT_FORMAT_VERSION:
+            s3a_state, _, migration_notes = _migrate_legacy_s3a_state(
                 loaded_state=s3a_state,
                 expected_state=expected_state,
             )
         s3a_head.module.load_state_dict(s3a_state, strict=True)
+    else:
+        migration_notes = []
 
     resume_meta = {
         "format_version": format_version,
         "saved_args": saved_args_dict,
         "s3a_runtime_state": saved_runtime_state,
+        "s3a_migration_notes": migration_notes,
     }
 
     if "train_steps" in checkpoint:
@@ -1742,6 +2039,7 @@ def main(args):
             allow_missing_manifest=args.allow_missing_manifest,
         )
         resumed_s3a_runtime_state = dict(resume_meta.get("s3a_runtime_state", {}))
+        resumed_migration_notes = list(resume_meta.get("s3a_migration_notes", []))
         if (
             resumed_rng_states is not None
             and rank < len(resumed_rng_states)
@@ -1759,6 +2057,11 @@ def main(args):
             f"collapse_mitigation_cooldown_windows={int(resumed_s3a_runtime_state.get('collapse_mitigation_cooldown_windows', 0))}, "
             f"collapse_mitigation_trigger_count={int(resumed_s3a_runtime_state.get('collapse_mitigation_trigger_count', 0))})"
         )
+        if resumed_migration_notes and rank == 0:
+            logger.warning(
+                "Applied legacy S3A state migration during resume: "
+                + ", ".join(resumed_migration_notes)
+            )
 
     if args.resume is None:
         update_ema(ema, model.module, decay=0)
@@ -1791,7 +2094,10 @@ def main(args):
     running_loss_self_only = 0.0
     running_utility_dino = 0.0
     running_utility_self = 0.0
-    running_utility_self_ema = 0.0
+    running_utility_self_active_ema = 0.0
+    running_utility_self_inactive_ema = 0.0
+    running_utility_self_active_ema_count = 0.0
+    running_utility_self_inactive_ema_count = 0.0
     running_probe_count = 0.0
     running_self_probe_count = 0.0
     running_collapse_alarm = 0.0
@@ -1833,6 +2139,8 @@ def main(args):
     if args.s3a:
         logger.info(
             f"S3A config:\n"
+            f"  checkpoint format   : {CHECKPOINT_FORMAT_VERSION}\n"
+            f"  metrics schema      : {METRICS_SCHEMA_VERSION}\n"
             f"  phase schedule     : {args.s3a_train_schedule} over {args.s3a_schedule_steps}\n"
             f"  diff schedule      : {args.s3a_diff_schedule}\n"
             f"  layer indices      : {s3a_layer_indices}\n"
@@ -1858,7 +2166,9 @@ def main(args):
             f"hold_windows={args.s3a_collapse_mitigate_windows}, "
             f"cooldown_windows={args.s3a_collapse_mitigate_cooldown_windows}\n"
             f"  probe every        : {args.s3a_probe_every}\n"
-            f"  probe mode         : {args.s3a_utility_probe_mode}\n"
+            f"  utility estimator  : {args.s3a_utility_probe_mode}\n"
+            f"  off-probe alpha fl : {args.s3a_gate_reopen_probe_alpha_floor}\n"
+            f"  source0 min alpha  : {args.s3a_protect_source0_min_alpha}\n"
             f"  loss weights       : feat={args.s3a_feat_weight}, "
             f"attn={args.s3a_attn_weight}, spatial={args.s3a_spatial_weight}"
         )
@@ -1980,6 +2290,10 @@ def main(args):
                 "utility_dino": 0.0,
                 "utility_self": 0.0,
                 "utility_self_ema": 0.0,
+                "utility_self_active_ema": 0.0,
+                "utility_self_inactive_ema": 0.0,
+                "utility_self_active_ema_count": 0.0,
+                "utility_self_inactive_ema_count": 0.0,
                 "probe_count": 0.0,
                 "self_probe_count": 0.0,
                 "collapse_alarm": 0.0,
@@ -2023,6 +2337,9 @@ def main(args):
                     if metrics_jsonl_path is not None:
                         event_row = {
                             "event": "non_finite_loss",
+                            "event_name": "non_finite_loss",
+                            "record_type": "event",
+                            "metrics_schema_version": METRICS_SCHEMA_VERSION,
                             "step": int(train_steps),
                             "batches_seen": int(batches_seen),
                             "git_revision": git_revision,
@@ -2056,6 +2373,9 @@ def main(args):
                         if metrics_jsonl_path is not None:
                             event_row = {
                                 "event": "non_finite_grad",
+                                "event_name": "non_finite_grad",
+                                "record_type": "event",
+                                "metrics_schema_version": METRICS_SCHEMA_VERSION,
                                 "step": int(train_steps),
                                 "batches_seen": int(batches_seen),
                                 "git_revision": git_revision,
@@ -2088,9 +2408,14 @@ def main(args):
             running_loss_self_only += align_stats["loss_self_only"] * align_stats["self_probe_count"]
             running_utility_dino += align_stats["utility_dino"] * align_stats["probe_count"]
             running_utility_self += align_stats["utility_self"] * align_stats["probe_count"]
-            running_utility_self_ema += (
-                align_stats["utility_self_ema"] * align_stats["self_probe_count"]
+            running_utility_self_active_ema += (
+                align_stats["utility_self_active_ema"] * align_stats["utility_self_active_ema_count"]
             )
+            running_utility_self_inactive_ema += (
+                align_stats["utility_self_inactive_ema"] * align_stats["utility_self_inactive_ema_count"]
+            )
+            running_utility_self_active_ema_count += align_stats["utility_self_active_ema_count"]
+            running_utility_self_inactive_ema_count += align_stats["utility_self_inactive_ema_count"]
             running_probe_count += align_stats["probe_count"]
             running_self_probe_count += align_stats["self_probe_count"]
             running_collapse_alarm += align_stats["collapse_alarm"] * align_stats["probe_count"]
@@ -2167,9 +2492,13 @@ def main(args):
                 avg_utility_self, _ = _reduce_probe_mean(
                     running_utility_self, running_probe_count
                 )
-                avg_utility_self_ema, _ = _reduce_probe_mean(
-                    running_utility_self_ema, running_self_probe_count
+                avg_utility_self_active_ema, global_active_ema_count = _reduce_probe_mean(
+                    running_utility_self_active_ema, running_utility_self_active_ema_count
                 )
+                avg_utility_self_inactive_ema, global_inactive_ema_count = _reduce_probe_mean(
+                    running_utility_self_inactive_ema, running_utility_self_inactive_ema_count
+                )
+                avg_utility_self_ema = avg_utility_self_active_ema
                 avg_collapse_alarm, _ = _reduce_probe_mean(
                     running_collapse_alarm, running_probe_count
                 )
@@ -2239,7 +2568,10 @@ def main(args):
                         f"loss_dino_only={avg_loss_dino_only:.6f}, "
                         f"utility_dino={avg_utility_dino:.6f}, "
                         f"utility_self={avg_utility_self:.6f}, "
-                        f"utility_self_ema={avg_utility_self_ema:.6f}, "
+                        f"utility_self_active_ema={avg_utility_self_active_ema:.6f}, "
+                        f"utility_self_inactive_ema={avg_utility_self_inactive_ema:.6f}, "
+                        f"utility_self_active_ema_n={int(global_active_ema_count)}, "
+                        f"utility_self_inactive_ema_n={int(global_inactive_ema_count)}, "
                         f"probes={int(global_probe_count)}, "
                         f"self_probes={int(global_self_probe_count)}, "
                         f"windows={collapse_alarm_windows}, "
@@ -2271,6 +2603,8 @@ def main(args):
                     f"U_dino={avg_utility_dino:.4f}  "
                     f"U_self={avg_utility_self:.4f}  "
                     f"UselfEMA={avg_utility_self_ema:.4f}  "
+                    f"UselfEMA_on={avg_utility_self_active_ema:.4f}  "
+                    f"UselfEMA_off={avg_utility_self_inactive_ema:.4f}  "
                     f"ProbeN={int(global_probe_count)}  "
                     f"SelfProbeN={int(global_self_probe_count)}  "
                     f"alarm={collapse_alarm:.0f}  "
@@ -2281,6 +2615,10 @@ def main(args):
                 )
                 if rank == 0 and metrics_jsonl_path is not None:
                     metric_row = {
+                        "record_type": "metric",
+                        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+                        "utility_ema_semantics": "utility_self_ema_alias_of_active_ema",
+                        "utility_probe_mode": args.s3a_utility_probe_mode,
                         "step": int(train_steps),
                         "batches_seen": int(batches_seen),
                         "git_revision": git_revision,
@@ -2300,6 +2638,7 @@ def main(args):
                         "raw_alpha_self": float(avg_raw_alpha_self),
                         "router_entropy_norm": float(avg_router_entropy),
                         "gate_self": float(avg_gate_self),
+                        "self_source_mask_mean": float(avg_gate_self),
                         "loss_fused": float(avg_loss_fused),
                         "loss_fused_probe": float(avg_loss_fused_probe),
                         "loss_dino_only": float(avg_loss_dino_only),
@@ -2307,6 +2646,10 @@ def main(args):
                         "utility_dino": float(avg_utility_dino),
                         "utility_self": float(avg_utility_self),
                         "utility_self_ema": float(avg_utility_self_ema),
+                        "utility_self_active_ema": float(avg_utility_self_active_ema),
+                        "utility_self_inactive_ema": float(avg_utility_self_inactive_ema),
+                        "utility_self_active_ema_count": int(global_active_ema_count),
+                        "utility_self_inactive_ema_count": int(global_inactive_ema_count),
                         "probe_count": int(global_probe_count),
                         "self_probe_count": int(global_self_probe_count),
                         "collapse_window_score": float(avg_collapse_alarm),
@@ -2357,7 +2700,10 @@ def main(args):
                 running_loss_self_only = 0.0
                 running_utility_dino = 0.0
                 running_utility_self = 0.0
-                running_utility_self_ema = 0.0
+                running_utility_self_active_ema = 0.0
+                running_utility_self_inactive_ema = 0.0
+                running_utility_self_active_ema_count = 0.0
+                running_utility_self_inactive_ema_count = 0.0
                 running_probe_count = 0.0
                 running_self_probe_count = 0.0
                 running_collapse_alarm = 0.0
@@ -2657,7 +3003,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--s3a-gate-utility-on-threshold",
         type=float,
         default=0.005,
-        help="Utility EMA above this threshold counts as recovery for gate reopen.",
+        help="Inactive-side utility EMA above this threshold counts as recovery for gate reopen.",
     )
     parser.add_argument(
         "--s3a-gate-utility-ema-momentum",
@@ -2685,6 +3031,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8000,
         help="Number of steps to apply DINO alpha floor with linear decay to 0.",
+    )
+    parser.add_argument(
+        "--s3a-protect-source0-min-alpha",
+        type=float,
+        default=0.05,
+        help=(
+            "Persistent minimum alpha for source0 (DINO). "
+            "Applied in both train and probe alpha builders; 0 disables."
+        ),
     )
     parser.add_argument(
         "--s3a-collapse-alpha-threshold",
@@ -2744,13 +3099,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--s3a-gate-reopen-probe-alpha-floor",
+        type=float,
+        default=0.05,
+        help=(
+            "Minimum alpha assigned to a currently gated-off source during "
+            "add-one counterfactual probe for reopen utility estimation. "
+            "Only used when --s3a-utility-probe-mode=policy_loo; 0 disables."
+        ),
+    )
+    parser.add_argument(
         "--s3a-utility-probe-mode",
         type=str,
-        choices=["uniform", "raw_alpha"],
-        default="uniform",
+        choices=["policy_loo", "uniform", "raw_alpha"],
+        default="policy_loo",
         help=(
-            "Probe mixing for utility estimation. "
-            "uniform decouples utility from router confidence."
+            "Utility estimator mode. "
+            "policy_loo uses policy-consistent leave-one-out/add-one utility "
+            "under the same alpha policy as training."
         ),
     )
 
@@ -2807,6 +3173,8 @@ def validate_args(args):
             raise ValueError("--s3a-dino-alpha-floor must be in [0, 1)")
         if args.s3a_dino_alpha_floor_steps < 0:
             raise ValueError("--s3a-dino-alpha-floor-steps must be >= 0")
+        if not (0.0 <= args.s3a_protect_source0_min_alpha < 1.0):
+            raise ValueError("--s3a-protect-source0-min-alpha must be in [0, 1)")
         if args.s3a_collapse_windows <= 0:
             raise ValueError("--s3a-collapse-windows must be > 0")
         if args.s3a_collapse_mitigate_windows <= 0:
@@ -2821,6 +3189,37 @@ def validate_args(args):
             raise ValueError(
                 "--s3a-probe-every must be <= --log-every to keep collapse "
                 "monitoring windows semantically consistent."
+            )
+        if not (0.0 <= args.s3a_gate_reopen_probe_alpha_floor < 1.0):
+            raise ValueError("--s3a-gate-reopen-probe-alpha-floor must be in [0, 1)")
+        if args.s3a_enable_selective_gate and args.s3a_utility_probe_mode != "policy_loo":
+            raise ValueError(
+                "--s3a-enable-selective-gate requires --s3a-utility-probe-mode=policy_loo"
+            )
+        if (
+            args.s3a_gate_reopen_probe_alpha_floor > 0
+            and args.s3a_utility_probe_mode != "policy_loo"
+        ):
+            raise ValueError(
+                "--s3a-gate-reopen-probe-alpha-floor requires "
+                "--s3a-utility-probe-mode=policy_loo"
+            )
+        if args.s3a_gate_reopen_probe_alpha_floor > 0 and not args.s3a_use_ema_source:
+            raise ValueError(
+                "--s3a-gate-reopen-probe-alpha-floor requires --s3a-use-ema-source"
+            )
+        max_source0_floor = args.s3a_protect_source0_min_alpha
+        if args.s3a_dino_alpha_floor > 0 and args.s3a_dino_alpha_floor_steps > 0:
+            max_source0_floor = max(max_source0_floor, args.s3a_dino_alpha_floor)
+        if (
+            args.s3a_use_ema_source
+            and args.s3a_gate_reopen_probe_alpha_floor > 0
+            and max_source0_floor + args.s3a_gate_reopen_probe_alpha_floor > 1.0
+        ):
+            raise ValueError(
+                "Inconsistent S3A alpha floors: "
+                "max(--s3a-dino-alpha-floor, --s3a-protect-source0-min-alpha) + "
+                "--s3a-gate-reopen-probe-alpha-floor must be <= 1.0"
             )
 
 
