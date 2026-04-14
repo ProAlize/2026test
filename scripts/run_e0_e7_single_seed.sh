@@ -33,6 +33,14 @@ LOG_EVERY="${LOG_EVERY:-200}"
 
 # Common alignment defaults.
 ALIGN_LAMBDA="${ALIGN_LAMBDA:-0.1}"
+S3A_SELF_WARMUP_STEPS="${S3A_SELF_WARMUP_STEPS:-5000}"
+S3A_DINO_ALPHA_FLOOR="${S3A_DINO_ALPHA_FLOOR:-0.1}"
+S3A_DINO_ALPHA_FLOOR_STEPS="${S3A_DINO_ALPHA_FLOOR_STEPS:-8000}"
+S3A_PROBE_EVERY="${S3A_PROBE_EVERY:-10}"
+S3A_UTILITY_PROBE_MODE="${S3A_UTILITY_PROBE_MODE:-uniform}"
+S3A_GATE_PATIENCE="${S3A_GATE_PATIENCE:-500}"
+S3A_GATE_REOPEN_PATIENCE="${S3A_GATE_REOPEN_PATIENCE:-200}"
+S3A_COLLAPSE_UTILITY_THRESHOLD="${S3A_COLLAPSE_UTILITY_THRESHOLD:-0.0}"
 
 # Execution controls.
 DRY_RUN="${DRY_RUN:-0}"
@@ -146,6 +154,10 @@ print_header() {
     echo "Max steps        : $MAX_STEPS"
     echo "Ckpt every       : $CKPT_EVERY"
     echo "Log every        : $LOG_EVERY"
+    echo "S3A warmup       : $S3A_SELF_WARMUP_STEPS"
+    echo "S3A alpha floor  : $S3A_DINO_ALPHA_FLOOR (steps=$S3A_DINO_ALPHA_FLOOR_STEPS)"
+    echo "S3A probe        : every $S3A_PROBE_EVERY, mode=$S3A_UTILITY_PROBE_MODE"
+    echo "S3A gate patience: off=$S3A_GATE_PATIENCE, reopen=$S3A_GATE_REOPEN_PATIENCE"
     echo "Model depth      : $MODEL_DEPTH"
     echo "Single tap idx   : $L_SINGLE"
     echo "Late-4 tap idx   : $L_LATE4"
@@ -228,11 +240,6 @@ run_s3a() {
     local attn_weight="$5"
     local spatial_weight="$6"
     local diff_schedule="$7"
-    local self_warmup_steps=5000
-    local dino_alpha_floor=0.1
-    local dino_alpha_floor_steps=5000
-    local probe_every=10
-
     local ema_flag="--no-s3a-use-ema-source"
     local gate_flag="--no-s3a-enable-selective-gate"
 
@@ -272,10 +279,14 @@ run_s3a() {
         --s3a-feat-weight 1.0 \
         --s3a-attn-weight "$attn_weight" \
         --s3a-spatial-weight "$spatial_weight" \
-        --s3a-self-warmup-steps "$self_warmup_steps" \
-        --s3a-dino-alpha-floor "$dino_alpha_floor" \
-        --s3a-dino-alpha-floor-steps "$dino_alpha_floor_steps" \
-        --s3a-probe-every "$probe_every" \
+        --s3a-self-warmup-steps "$S3A_SELF_WARMUP_STEPS" \
+        --s3a-dino-alpha-floor "$S3A_DINO_ALPHA_FLOOR" \
+        --s3a-dino-alpha-floor-steps "$S3A_DINO_ALPHA_FLOOR_STEPS" \
+        --s3a-probe-every "$S3A_PROBE_EVERY" \
+        --s3a-utility-probe-mode "$S3A_UTILITY_PROBE_MODE" \
+        --s3a-gate-patience "$S3A_GATE_PATIENCE" \
+        --s3a-gate-reopen-patience "$S3A_GATE_REOPEN_PATIENCE" \
+        --s3a-collapse-utility-threshold "$S3A_COLLAPSE_UTILITY_THRESHOLD" \
         --no-s3a-trainable-ema-adapters \
         "$ema_flag" \
         "$gate_flag" \

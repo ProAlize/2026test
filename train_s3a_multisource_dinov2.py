@@ -24,7 +24,7 @@ import logging
 from time import time, strftime
 from copy import deepcopy
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -810,6 +810,7 @@ def compute_s3a_alignment_loss(
     raw_alpha_self_acc = 0.0
     router_entropy_acc = 0.0
     loss_fused_acc = 0.0
+    loss_fused_probe_acc = 0.0
     loss_dino_only_acc = 0.0
     loss_self_only_acc = 0.0
     utility_dino_acc = 0.0
@@ -820,6 +821,10 @@ def compute_s3a_alignment_loss(
     self_only_count = 0
     collapse_alarm_count = 0
     alpha_dino_layer_values = [0.0 for _ in s3a_head.layer_indices]
+    gate_patience_windows = max(1, math.ceil(args.s3a_gate_patience / max(1, args.s3a_probe_every)))
+    gate_reopen_windows = max(
+        1, math.ceil(args.s3a_gate_reopen_patience / max(1, args.s3a_probe_every))
+    )
 
     for slot, layer_idx in enumerate(s3a_head.layer_indices):
         key = str(layer_idx)
@@ -875,14 +880,9 @@ def compute_s3a_alignment_loss(
             self_warmup_steps=args.s3a_self_warmup_steps,
             enable_selective_gate=args.s3a_enable_selective_gate,
         )
-        # Probe mask disables selective gate to estimate counterfactual utilities
-        # even when a source is currently gated off.
-        source_mask_probe = s3a_head.get_source_mask(
-            layer_slot=slot,
-            source_ready=source_ready,
-            current_step=current_step,
-            self_warmup_steps=args.s3a_self_warmup_steps,
-            enable_selective_gate=False,
+        do_probe = (
+            args.s3a_probe_every <= 1
+            or (current_step % args.s3a_probe_every) == 0
         )
 
         def _build_alpha(mask_vec: torch.Tensor) -> torch.Tensor:
@@ -907,7 +907,12 @@ def compute_s3a_alignment_loss(
             return alpha_local
 
         alpha = _build_alpha(source_mask)
-        alpha_probe = _build_alpha(source_mask_probe)
+
+        def _build_utility_probe_alpha(mask_vec: torch.Tensor) -> torch.Tensor:
+            if args.s3a_utility_probe_mode == "raw_alpha":
+                return _build_alpha(mask_vec)
+            alpha_probe_local = mask_vec / mask_vec.sum().clamp(min=1e-8)
+            return alpha_probe_local.unsqueeze(0).expand(raw_alpha.shape[0], -1)
 
         fused = torch.zeros_like(pred)
         for src_idx, src_tokens in enumerate(sources):
@@ -927,10 +932,6 @@ def compute_s3a_alignment_loss(
             + args.s3a_spatial_weight * spatial_loss_ps
         )
 
-        do_probe = (
-            args.s3a_probe_every <= 1
-            or (current_step % args.s3a_probe_every) == 0
-        )
         dino_layer_loss_mean = 0.0
         self_layer_loss_mean = 0.0
         fused_probe_loss_mean = 0.0
@@ -938,6 +939,16 @@ def compute_s3a_alignment_loss(
         utility_self_layer = 0.0
 
         if do_probe:
+            # Probe mask disables selective gate to estimate source utility even
+            # when a source is currently gated off.
+            source_mask_probe = s3a_head.get_source_mask(
+                layer_slot=slot,
+                source_ready=source_ready,
+                current_step=current_step,
+                self_warmup_steps=args.s3a_self_warmup_steps,
+                enable_selective_gate=False,
+            )
+            alpha_probe = _build_utility_probe_alpha(source_mask_probe)
             with torch.no_grad():
                 pred_probe = pred.detach()
                 fused_probe = torch.zeros_like(pred_probe)
@@ -1019,6 +1030,7 @@ def compute_s3a_alignment_loss(
         else:
             router_entropy_acc += 0.0
         loss_fused_acc += combined_ps.mean().item()
+        loss_fused_probe_acc += fused_probe_loss_mean
         loss_dino_only_acc += dino_layer_loss_mean
         utility_dino_acc += utility_dino_layer
         utility_self_acc += utility_self_layer
@@ -1033,10 +1045,11 @@ def compute_s3a_alignment_loss(
                 do_probe
                 and
                 current_step >= args.s3a_self_warmup_steps
+                and source_ready[1] > 0
                 and alpha[:, 0].mean().item() < args.s3a_collapse_alpha_threshold
                 and alpha[:, 1].mean().item() > args.s3a_collapse_self_threshold
-                and self_layer_loss_mean + args.s3a_collapse_margin
-                < dino_layer_loss_mean
+                and utility_dino_layer > args.s3a_collapse_utility_threshold
+                and fused_probe_loss_mean + args.s3a_collapse_margin < self_layer_loss_mean
             ):
                 collapse_alarm_count += 1
 
@@ -1064,8 +1077,8 @@ def compute_s3a_alignment_loss(
                     source_ready=ready,
                     utility_off_threshold=args.s3a_gate_utility_off_threshold,
                     utility_on_threshold=args.s3a_gate_utility_on_threshold,
-                    patience=args.s3a_gate_patience,
-                    reopen_patience=args.s3a_gate_reopen_patience,
+                    patience=gate_patience_windows,
+                    reopen_patience=gate_reopen_windows,
                     utility_ema_momentum=args.s3a_gate_utility_ema_momentum,
                     protect_source0=True,
                 )
@@ -1084,6 +1097,7 @@ def compute_s3a_alignment_loss(
             "raw_alpha_self": 0.0,
             "router_entropy_norm": 0.0,
             "loss_fused": 0.0,
+            "loss_fused_probe": 0.0,
             "loss_dino_only": 0.0,
             "loss_self_only": 0.0,
             "utility_dino": 0.0,
@@ -1115,6 +1129,7 @@ def compute_s3a_alignment_loss(
         ),
         "router_entropy_norm": router_entropy_acc / used_layers,
         "loss_fused": loss_fused_acc / used_layers,
+        "loss_fused_probe": loss_fused_probe_acc / max(1, utility_probe_count),
         "loss_dino_only": loss_dino_only_acc / max(1, dino_only_count),
         "loss_self_only": (
             loss_self_only_acc / max(1, self_only_count)
@@ -1197,6 +1212,99 @@ def _validate_checkpoint_manifest(checkpoint_path: str, allow_missing_manifest: 
         )
 
 
+def _namespace_to_dict(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, argparse.Namespace):
+        return vars(value).copy()
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _is_equal_resume_value(current: Any, saved: Any, tol: float = 1e-12) -> bool:
+    if isinstance(current, (int, float, bool)) and isinstance(saved, (int, float, bool)):
+        return abs(float(current) - float(saved)) <= tol
+    return current == saved
+
+
+def _validate_resume_contract(current_args, saved_args_dict: Dict[str, Any]) -> None:
+    if not saved_args_dict:
+        return
+    keys = [
+        "model",
+        "s3a",
+        "s3a_use_ema_source",
+        "s3a_trainable_ema_adapters",
+        "s3a_enable_selective_gate",
+        "s3a_self_warmup_steps",
+        "s3a_dino_alpha_floor",
+        "s3a_dino_alpha_floor_steps",
+        "s3a_probe_every",
+        "s3a_utility_probe_mode",
+        "s3a_gate_patience",
+        "s3a_gate_reopen_patience",
+        "s3a_gate_utility_off_threshold",
+        "s3a_gate_utility_on_threshold",
+        "s3a_gate_utility_ema_momentum",
+        "s3a_feat_weight",
+        "s3a_attn_weight",
+        "s3a_spatial_weight",
+        "s3a_layer_indices",
+        "s3a_lambda",
+    ]
+    mismatches = []
+    for key in keys:
+        if not hasattr(current_args, key):
+            continue
+        if key not in saved_args_dict:
+            continue
+        current_val = getattr(current_args, key)
+        saved_val = saved_args_dict[key]
+        if not _is_equal_resume_value(current_val, saved_val):
+            mismatches.append((key, current_val, saved_val))
+    if mismatches:
+        detail = ", ".join(
+            [f"{k}(current={c}, checkpoint={s})" for (k, c, s) in mismatches[:8]]
+        )
+        raise ValueError(
+            "Resume contract mismatch for critical S3A args: "
+            f"{detail}. Refuse to resume with incompatible config."
+        )
+
+
+def _migrate_legacy_s3a_state(
+    loaded_state: Dict[str, torch.Tensor],
+    expected_state: Dict[str, torch.Tensor],
+) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+    migrated = dict(loaded_state)
+    missing = [k for k in expected_state.keys() if k not in migrated]
+    unexpected = [k for k in migrated.keys() if k not in expected_state]
+    if unexpected:
+        raise ValueError(
+            "S3A checkpoint contains unexpected keys not present in current model: "
+            f"{unexpected[:8]}"
+        )
+
+    legacy_fill_keys = (
+        "source_gate_mask",
+        "source_inactive_steps",
+        "source_recover_steps",
+        "source_utility_ema",
+        "ema_adapters.",
+    )
+    disallowed_missing = [k for k in missing if not k.startswith(legacy_fill_keys)]
+    if disallowed_missing:
+        raise ValueError(
+            "S3A checkpoint missing non-migratable keys: "
+            f"{disallowed_missing[:8]}"
+        )
+
+    for key in missing:
+        migrated[key] = expected_state[key]
+    return migrated, missing
+
+
 def save_checkpoint(
     checkpoint_dir: str,
     train_steps: int,
@@ -1207,9 +1315,10 @@ def save_checkpoint(
     args,
     s3a_head=None,
     rng_states: Optional[List[dict]] = None,
+    s3a_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     checkpoint = {
-        "format_version": 2,
+        "format_version": 3,
         "train_steps": train_steps,
         "batches_seen": batches_seen,
         "model_state": model.module.state_dict(),
@@ -1221,6 +1330,8 @@ def save_checkpoint(
         checkpoint["s3a_head_state"] = s3a_head.module.state_dict()
     if rng_states is not None:
         checkpoint["rng_states"] = rng_states
+    if s3a_runtime_state is not None:
+        checkpoint["s3a_runtime_state"] = dict(s3a_runtime_state)
 
     checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
     _atomic_torch_save(checkpoint, checkpoint_path)
@@ -1234,8 +1345,9 @@ def load_checkpoint(
     ema,
     opt,
     s3a_head=None,
+    current_args=None,
     allow_missing_manifest: bool = False,
-) -> Tuple[int, int, Optional[List[dict]]]:
+) -> Tuple[int, int, Optional[List[dict]], Dict[str, Any]]:
     _validate_checkpoint_manifest(
         checkpoint_path,
         allow_missing_manifest=allow_missing_manifest,
@@ -1247,10 +1359,17 @@ def load_checkpoint(
             f"Unexpected checkpoint format at {checkpoint_path}: {type(checkpoint)}"
         )
 
+    format_version = int(checkpoint.get("format_version", 1))
     model_state = checkpoint.get("model_state", checkpoint.get("model"))
     ema_state = checkpoint.get("ema_state", checkpoint.get("ema"))
     opt_state = checkpoint.get("opt_state", checkpoint.get("opt"))
     s3a_state = checkpoint.get("s3a_head_state", checkpoint.get("s3a_head"))
+    saved_args_dict = _namespace_to_dict(checkpoint.get("args"))
+    saved_runtime_state = checkpoint.get("s3a_runtime_state")
+    if not isinstance(saved_runtime_state, dict):
+        saved_runtime_state = {}
+    if current_args is not None:
+        _validate_resume_contract(current_args, saved_args_dict)
 
     if model_state is None or ema_state is None or opt_state is None:
         raise ValueError(
@@ -1267,18 +1386,30 @@ def load_checkpoint(
             raise ValueError(
                 "S3A checkpoint is missing s3a_head_state/s3a_head while --s3a is enabled."
             )
+        expected_state = s3a_head.module.state_dict()
+        if format_version < 3:
+            s3a_state, _ = _migrate_legacy_s3a_state(
+                loaded_state=s3a_state,
+                expected_state=expected_state,
+            )
         s3a_head.module.load_state_dict(s3a_state, strict=True)
+
+    resume_meta = {
+        "format_version": format_version,
+        "saved_args": saved_args_dict,
+        "s3a_runtime_state": saved_runtime_state,
+    }
 
     if "train_steps" in checkpoint:
         train_steps = int(checkpoint["train_steps"])
         batches_seen = int(checkpoint.get("batches_seen", train_steps))
-        return train_steps, batches_seen, checkpoint.get("rng_states")
+        return train_steps, batches_seen, checkpoint.get("rng_states"), resume_meta
 
     # Backward fallback: infer from filename like 0001000.pt
     stem = os.path.basename(checkpoint_path).split(".")[0]
     if stem.isdigit():
         step = int(stem)
-        return step, step, None
+        return step, step, None, resume_meta
     raise ValueError(
         "Checkpoint does not contain train_steps and filename is not numeric. "
         f"Unable to infer resume step from: {checkpoint_path}"
@@ -1456,6 +1587,7 @@ def main(args):
     resumed_train_steps = 0
     resumed_batches_seen = 0
     resumed_rng_states: Optional[List[dict]] = None
+    resumed_s3a_runtime_state: Dict[str, Any] = {}
 
     transform = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
@@ -1495,14 +1627,21 @@ def main(args):
     logger.info(f"Dataset: {len(dataset):,} images  |  path: {args.data_path}")
 
     if args.resume is not None:
-        resumed_train_steps, resumed_batches_seen, resumed_rng_states = load_checkpoint(
+        (
+            resumed_train_steps,
+            resumed_batches_seen,
+            resumed_rng_states,
+            resume_meta,
+        ) = load_checkpoint(
             checkpoint_path=args.resume,
             model=model,
             ema=ema,
             opt=opt,
             s3a_head=s3a_head if args.s3a else None,
+            current_args=args,
             allow_missing_manifest=args.allow_missing_manifest,
         )
+        resumed_s3a_runtime_state = dict(resume_meta.get("s3a_runtime_state", {}))
         if (
             resumed_rng_states is not None
             and rank < len(resumed_rng_states)
@@ -1515,7 +1654,8 @@ def main(args):
         logger.info(
             f"Resumed from checkpoint: {args.resume} "
             f"(train_steps={resumed_train_steps}, batches_seen={resumed_batches_seen}, "
-            f"rng_restored={resumed_rng_states is not None})"
+            f"rng_restored={resumed_rng_states is not None}, "
+            f"collapse_alarm_windows={int(resumed_s3a_runtime_state.get('collapse_alarm_windows', 0))})"
         )
 
     if args.resume is None:
@@ -1544,6 +1684,7 @@ def main(args):
     running_raw_alpha_self = 0.0
     running_router_entropy = 0.0
     running_loss_fused = 0.0
+    running_loss_fused_probe = 0.0
     running_loss_dino_only = 0.0
     running_loss_self_only = 0.0
     running_utility_dino = 0.0
@@ -1555,7 +1696,11 @@ def main(args):
     running_alpha_dino_min_layer = 0.0
     running_alpha_dino_max_layer = 0.0
     running_alpha_dino_layers = [0.0 for _ in s3a_layer_indices]
-    collapse_alarm_windows = 0
+    collapse_alarm_windows = int(resumed_s3a_runtime_state.get("collapse_alarm_windows", 0))
+    gate_off_probe_windows = max(1, math.ceil(args.s3a_gate_patience / max(1, args.s3a_probe_every)))
+    gate_reopen_probe_windows = max(
+        1, math.ceil(args.s3a_gate_reopen_patience / max(1, args.s3a_probe_every))
+    )
     start_time = time()
 
     logger.info(
@@ -1589,15 +1734,19 @@ def main(args):
             f"  floor steps        : {args.s3a_dino_alpha_floor_steps}\n"
             f"  gate utility thr   : off={args.s3a_gate_utility_off_threshold}, "
             f"on={args.s3a_gate_utility_on_threshold}\n"
-            f"  gate patience      : off={args.s3a_gate_patience}, "
-            f"reopen={args.s3a_gate_reopen_patience}, "
+            f"  gate patience(step): off={args.s3a_gate_patience}, "
+            f"reopen={args.s3a_gate_reopen_patience}\n"
+            f"  gate patience(win) : off={gate_off_probe_windows}, "
+            f"reopen={gate_reopen_probe_windows}, "
             f"ema={args.s3a_gate_utility_ema_momentum}\n"
             f"  collapse thresholds: "
             f"alpha<{args.s3a_collapse_alpha_threshold}, "
             f"self>{args.s3a_collapse_self_threshold}, "
+            f"u_dino>{args.s3a_collapse_utility_threshold}, "
             f"margin={args.s3a_collapse_margin}, "
             f"windows={args.s3a_collapse_windows}\n"
             f"  probe every        : {args.s3a_probe_every}\n"
+            f"  probe mode         : {args.s3a_utility_probe_mode}\n"
             f"  loss weights       : feat={args.s3a_feat_weight}, "
             f"attn={args.s3a_attn_weight}, spatial={args.s3a_spatial_weight}"
         )
@@ -1695,6 +1844,7 @@ def main(args):
                 "raw_alpha_self": 0.0,
                 "router_entropy_norm": 0.0,
                 "loss_fused": 0.0,
+                "loss_fused_probe": 0.0,
                 "loss_dino_only": 0.0,
                 "loss_self_only": 0.0,
                 "utility_dino": 0.0,
@@ -1783,14 +1933,17 @@ def main(args):
             running_raw_alpha_self += align_stats["raw_alpha_self"]
             running_router_entropy += align_stats["router_entropy_norm"]
             running_loss_fused += align_stats["loss_fused"]
-            running_loss_dino_only += align_stats["loss_dino_only"]
-            running_loss_self_only += align_stats["loss_self_only"]
-            running_utility_dino += align_stats["utility_dino"]
-            running_utility_self += align_stats["utility_self"]
-            running_utility_self_ema += align_stats["utility_self_ema"]
+            running_loss_fused_probe += align_stats["loss_fused_probe"] * align_stats["probe_count"]
+            running_loss_dino_only += align_stats["loss_dino_only"] * align_stats["probe_count"]
+            running_loss_self_only += align_stats["loss_self_only"] * align_stats["self_probe_count"]
+            running_utility_dino += align_stats["utility_dino"] * align_stats["probe_count"]
+            running_utility_self += align_stats["utility_self"] * align_stats["probe_count"]
+            running_utility_self_ema += (
+                align_stats["utility_self_ema"] * align_stats["self_probe_count"]
+            )
             running_probe_count += align_stats["probe_count"]
             running_self_probe_count += align_stats["self_probe_count"]
-            running_collapse_alarm += align_stats["collapse_alarm"]
+            running_collapse_alarm += align_stats["collapse_alarm"] * align_stats["probe_count"]
             running_alpha_dino_min_layer += align_stats["alpha_dino_min_layer"]
             running_alpha_dino_max_layer += align_stats["alpha_dino_max_layer"]
             if args.s3a and len(running_alpha_dino_layers) == len(align_stats["alpha_dino_layers"]):
@@ -1849,6 +2002,9 @@ def main(args):
                 avg_raw_alpha_self = _reduce_mean(running_raw_alpha_self)
                 avg_router_entropy = _reduce_mean(running_router_entropy)
                 avg_loss_fused = _reduce_mean(running_loss_fused)
+                avg_loss_fused_probe, _ = _reduce_probe_mean(
+                    running_loss_fused_probe, running_probe_count
+                )
                 avg_loss_dino_only, global_probe_count = _reduce_probe_mean(
                     running_loss_dino_only, running_probe_count
                 )
@@ -1877,18 +2033,20 @@ def main(args):
                     dist.all_reduce(layer_avg_tensor, op=dist.ReduceOp.SUM)
                     avg_alpha_dino_layers.append(layer_avg_tensor.item() / dist.get_world_size())
 
-                collapse_window_triggered = (
-                    args.s3a_use_ema_source
-                    and global_probe_count > 0
-                    and global_self_probe_count > 0
-                    and train_steps >= args.s3a_self_warmup_steps
-                    and avg_alpha_dino < args.s3a_collapse_alpha_threshold
-                    and avg_alpha_self > args.s3a_collapse_self_threshold
-                    and avg_loss_self_only + args.s3a_collapse_margin < avg_loss_dino_only
-                )
-                collapse_alarm_windows = (
-                    collapse_alarm_windows + 1 if collapse_window_triggered else 0
-                )
+                collapse_window_triggered = False
+                if global_probe_count > 0:
+                    collapse_window_triggered = (
+                        args.s3a_use_ema_source
+                        and global_self_probe_count > 0
+                        and train_steps >= args.s3a_self_warmup_steps
+                        and avg_alpha_dino < args.s3a_collapse_alpha_threshold
+                        and avg_alpha_self > args.s3a_collapse_self_threshold
+                        and avg_utility_dino > args.s3a_collapse_utility_threshold
+                        and avg_loss_fused_probe + args.s3a_collapse_margin < avg_loss_self_only
+                    )
+                    collapse_alarm_windows = (
+                        collapse_alarm_windows + 1 if collapse_window_triggered else 0
+                    )
                 collapse_alarm = (
                     1.0 if collapse_alarm_windows >= args.s3a_collapse_windows else 0.0
                 )
@@ -1897,8 +2055,11 @@ def main(args):
                         "S3A collapse alarm triggered: "
                         f"alpha_dino={avg_alpha_dino:.4f}, "
                         f"alpha_self={avg_alpha_self:.4f}, "
+                        f"loss_fused={avg_loss_fused:.6f}, "
+                        f"loss_fused_probe={avg_loss_fused_probe:.6f}, "
                         f"loss_self_only={avg_loss_self_only:.6f}, "
                         f"loss_dino_only={avg_loss_dino_only:.6f}, "
+                        f"utility_dino={avg_utility_dino:.6f}, "
                         f"utility_self={avg_utility_self:.6f}, "
                         f"utility_self_ema={avg_utility_self_ema:.6f}, "
                         f"probes={int(global_probe_count)}, "
@@ -1923,6 +2084,7 @@ def main(args):
                     f"H={avg_router_entropy:.3f}  "
                     f"gate_self={avg_gate_self:.3f}  "
                     f"Lfused={avg_loss_fused:.4f}  "
+                    f"LfusedProbe={avg_loss_fused_probe:.4f}  "
                     f"Ldino={avg_loss_dino_only:.4f}  "
                     f"Lself={avg_loss_self_only:.4f}  "
                     f"U_dino={avg_utility_dino:.4f}  "
@@ -1954,6 +2116,7 @@ def main(args):
                         "router_entropy_norm": float(avg_router_entropy),
                         "gate_self": float(avg_gate_self),
                         "loss_fused": float(avg_loss_fused),
+                        "loss_fused_probe": float(avg_loss_fused_probe),
                         "loss_dino_only": float(avg_loss_dino_only),
                         "loss_self_only": float(avg_loss_self_only),
                         "utility_dino": float(avg_utility_dino),
@@ -1990,6 +2153,7 @@ def main(args):
                 running_raw_alpha_self = 0.0
                 running_router_entropy = 0.0
                 running_loss_fused = 0.0
+                running_loss_fused_probe = 0.0
                 running_loss_dino_only = 0.0
                 running_loss_self_only = 0.0
                 running_utility_dino = 0.0
@@ -2018,6 +2182,9 @@ def main(args):
                         args,
                         s3a_head if args.s3a else None,
                         rng_states=rng_states,
+                        s3a_runtime_state={
+                            "collapse_alarm_windows": int(collapse_alarm_windows),
+                        },
                     )
                     logger.info(
                         f"Saved checkpoint to {ckpt_path} "
@@ -2038,6 +2205,9 @@ def main(args):
                         args,
                         s3a_head if args.s3a else None,
                         rng_states=rng_states,
+                        s3a_runtime_state={
+                            "collapse_alarm_windows": int(collapse_alarm_windows),
+                        },
                     )
                     logger.info(
                         f"Reached max_steps={args.max_steps}. "
@@ -2061,6 +2231,9 @@ def main(args):
             args,
             s3a_head if args.s3a else None,
             rng_states=rng_states,
+            s3a_runtime_state={
+                "collapse_alarm_windows": int(collapse_alarm_windows),
+            },
         )
         logger.info(
             f"Saved final checkpoint to {ckpt_path} "
@@ -2231,12 +2404,23 @@ def build_parser() -> argparse.ArgumentParser:
     # Legacy threshold retained for backward CLI compatibility; gate decisions
     # now use utility thresholds below.
     parser.add_argument("--s3a-source-gate-threshold", type=float, default=0.05)
-    parser.add_argument("--s3a-gate-patience", type=int, default=200)
+    parser.add_argument(
+        "--s3a-gate-patience",
+        type=int,
+        default=500,
+        help=(
+            "Step-based patience before gating off a source. "
+            "Converted internally to probe windows via ceil(patience/probe_every)."
+        ),
+    )
     parser.add_argument(
         "--s3a-gate-reopen-patience",
         type=int,
-        default=50,
-        help="Consecutive windows above on-threshold required to reopen a gated source.",
+        default=200,
+        help=(
+            "Step-based patience before reopening a gated source. "
+            "Converted internally to probe windows via ceil(patience/probe_every)."
+        ),
     )
     parser.add_argument(
         "--s3a-gate-utility-off-threshold",
@@ -2274,7 +2458,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s3a-dino-alpha-floor-steps",
         type=int,
-        default=5000,
+        default=8000,
         help="Number of steps to apply DINO alpha floor with linear decay to 0.",
     )
     parser.add_argument(
@@ -2293,7 +2477,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--s3a-collapse-margin",
         type=float,
         default=0.01,
-        help="Collapse alarm margin: loss_self_only + margin < loss_dino_only.",
+        help="Collapse alarm margin used with loss_fused + margin < loss_self_only.",
+    )
+    parser.add_argument(
+        "--s3a-collapse-utility-threshold",
+        type=float,
+        default=0.0,
+        help="Collapse alarm requires utility_dino above this threshold.",
     )
     parser.add_argument(
         "--s3a-collapse-windows",
@@ -2304,10 +2494,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s3a-probe-every",
         type=int,
-        default=1,
+        default=10,
         help=(
             "Compute source-only diagnostic probes every N steps. "
             "1 means probe every step."
+        ),
+    )
+    parser.add_argument(
+        "--s3a-utility-probe-mode",
+        type=str,
+        choices=["uniform", "raw_alpha"],
+        default="uniform",
+        help=(
+            "Probe mixing for utility estimation. "
+            "uniform decouples utility from router confidence."
         ),
     )
 
@@ -2366,8 +2566,15 @@ def validate_args(args):
             raise ValueError("--s3a-dino-alpha-floor-steps must be >= 0")
         if args.s3a_collapse_windows <= 0:
             raise ValueError("--s3a-collapse-windows must be > 0")
+        if args.s3a_collapse_utility_threshold < 0:
+            raise ValueError("--s3a-collapse-utility-threshold must be >= 0")
         if args.s3a_probe_every <= 0:
             raise ValueError("--s3a-probe-every must be > 0")
+        if args.s3a_probe_every > args.log_every:
+            raise ValueError(
+                "--s3a-probe-every must be <= --log-every to keep collapse "
+                "monitoring windows semantically consistent."
+            )
 
 
 def cli_main():
