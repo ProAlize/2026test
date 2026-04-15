@@ -1,127 +1,159 @@
 # Proof Package
 
 ## Claim
-For the current S3A implementation in `/home/liuchunfa/2026qjx/2026test/train_s3a_multisource_dinov2.py`, under dual-source mode (`num_sources=2`) and validated arguments (`validate_args` passes), define:
+For the current implementation in `/home/liuchunfa/2026qjx/2026test/train_s3a_multisource_dinov2.py`, under:
 
-- source0 as DINO, source1 as EMA-self,
-- training/probe fusion weights by `alpha = _build_alpha(mask_vec, extra_min_alpha_by_source)`,
-- persistent DINO floor $m := \texttt{s3a\_protect\_source0\_min\_alpha}$,
-- optional reopen-probe source1 floor $r := \texttt{s3a\_gate\_reopen\_probe\_alpha\_floor}$.
+- dual-source mode (`s3a_use_ema_source=True`, source0=DINO, source1=self),
+- `validate_args(args)` passed,
+- analysis restricted to runtime call paths inside `compute_s3a_alignment_loss(...)` and the main logging/mitigation block,
 
-Then the following hold:
+define:
 
-1. For every call to `_build_alpha`, $alpha$ is a valid probability vector:
-$$
-\forall i,\ \alpha_i \ge 0,\qquad \sum_i \alpha_i = 1.
-$$
+- $m := \texttt{s3a\_protect\_source0\_min\_alpha}$,
+- $d_{\text{sched}}(k)$ as decayed DINO floor at step $k$ from `source0_min_alpha_at_step`,
+- $d(k) := \max\{m, d_{\text{sched}}(k)\}$,
+- $r := \texttt{s3a\_gate\_reopen\_probe\_alpha\_floor}$.
 
-2. If `source_ready[0] > 0`, then training/probe alpha builder enforces:
-$$
-\alpha_0 \ge d,\quad d := \max\!\big(m,\ d_{\text{sched}}\big),
-$$
-where $d_{\text{sched}}$ is the time-decayed floor from `s3a_dino_alpha_floor` when active.
-In particular, $\alpha_0 \ge m$ whenever source0 is ready.
+Then:
 
-3. For add-one reopen probe (`extra_min_alpha_by_source={1: r}`), if $d+r \le 1$, then both lower bounds hold simultaneously:
+1. Every runtime `_build_alpha` invocation in this graph returns $\alpha \in \Delta^2$:
 $$
-\alpha_0 \ge d,\qquad \alpha_1 \ge r.
+\alpha_i \ge 0,\qquad \sum_i \alpha_i = 1.
 $$
 
-4. Collapse-alarm alpha condition is boundary-reachable at floor equality: because implementation uses `<=` and validator enforces
+2. For train/probe alpha builds where source0 is ready:
 $$
-\texttt{s3a\_collapse\_alpha\_threshold} \ge m,
+\alpha_0 \ge d(k) \ge m.
 $$
-the alarm is not structurally blocked by the source0 floor at equality.
+
+3. For add-one reopen probes using `extra_min_alpha_by_source={1:r}`, if $d(k)+r\le 1$:
+$$
+\alpha_0 \ge d(k),\qquad \alpha_1 \ge r.
+$$
+
+4. Under selective gate update with `protect_source0=True`, source0 controller lane is forcibly kept on:
+$$
+\texttt{source\_gate\_mask}[l,0] = 1,\ \forall\ \text{updated layer slot } l.
+$$
+
+5. Auto-mitigation has a floor-relative trigger channel independent of `s3a_collapse_alpha_threshold`: if windowed `dino_starved_alarm=1`, mitigation can trigger without using that absolute alpha threshold.
 
 ## Status
 PROVABLE AS STATED
 
 ## Assumptions
-- `validate_args(args)` has passed.
-- Dual-source branch is active (`s3a_use_ema_source=True`, hence `num_sources=2`).
-- Source0 is available in the considered step/layer (`source_ready[0] > 0`).
-- For part (3), either `r=0` or validator feasibility check ensures $d+r\le 1$ in the relevant regime.
-- We reason over the implemented code paths:
-  - `_apply_joint_min_alpha` and `_build_alpha` in `compute_s3a_alignment_loss`.
-  - `validate_args` consistency checks.
-  - collapse predicates in per-probe and window-level logic.
+- `validate_args(args)` passed.
+- Runtime follows existing call guards in `compute_s3a_alignment_loss`.
+- Source0 is available (`source_ready[0] > 0`) on the analyzed path.
+- For Claim 3, validator feasibility condition holds when $r>0$:
+$$
+\max\{\texttt{s3a\_dino\_alpha\_floor},\,m\}+r\le1.
+$$
 
 ## Notation
-- Let $\tilde{\alpha}\in\mathbb{R}_{\ge0}^2$ denote normalized masked router output before floor projection.
-- Let floor vector $f\in\mathbb{R}_{\ge0}^2$ with components set by source-wise minimum-alpha constraints.
-- Let $F := \sum_i f_i$.
-- Let $\Delta^2 := \{\alpha\in\mathbb{R}_{\ge0}^2:\sum_i\alpha_i=1\}$.
+- $\hat{\alpha}$: masked router output before normalization.
+- $\tilde{\alpha}$: normalized masked alpha before floor projection.
+- $f$: per-source floor vector used by `_apply_joint_min_alpha`.
+- $F:=\sum_i f_i$.
+- $\Delta^2:=\{x\in\mathbb{R}_{\ge0}^2:\sum_i x_i=1\}$.
 
 ## Proof Strategy
-Direct proof from implementation semantics:
-1. Read `_build_alpha` as "masked-softmax normalization + floor projection".
-2. Analyze `_apply_joint_min_alpha` branch by branch.
-3. Specialize to source0/source1 floors used in training and add-one reopen probes.
-4. Use validator inequalities plus inclusive predicate (`<=`) to prove collapse condition reachability.
+Direct proof by code-path invariants and branch analysis:
+
+1. Prove mask positivity on all runtime `_build_alpha` call sites.
+2. Prove normalization + joint floor projection preserve simplex and floor lower bounds.
+3. Prove source0 gate protection is hard-coded in gate update.
+4. Prove mitigation has a threshold-independent sufficient trigger via `dino_starved_alarm`.
 
 ## Dependency Map
-1. Main claim (1) depends on normalization and final renormalization in `_apply_joint_min_alpha`.
-2. Main claim (2) depends on `_compute_dino_floor` and floor insertion `min_alpha_by_source[0]=d`.
-3. Main claim (3) depends on joint floor map merge in `_build_alpha` and feasibility assumption $d+r\le1$.
-4. Main claim (4) depends on:
-   - per-probe/window predicates using `alpha_dino <= threshold`,
-   - validator check `collapse_alpha_threshold >= s3a_protect_source0_min_alpha`.
+1. Mask positivity lemma depends on `get_source_mask` fallback and probe call guards.
+2. Simplex lemma depends on `_build_alpha` normalization and `_apply_joint_min_alpha` branches.
+3. Floor lemma depends on `_compute_dino_floor` and floor merge rule.
+4. Source0 gate lemma depends on `update_gate_state(..., protect_source0=True)`.
+5. Mitigation lemma depends on definitions of `dino_starved`, `dino_starved_alarm`, and mitigation trigger logic.
 
 ## Proof
-Step 1. `_build_alpha` first constructs
-$$
-\tilde{\alpha} = \frac{\texttt{raw\_alpha}\odot \texttt{mask}}{\sum_j \texttt{raw\_alpha}_j\texttt{mask}_j},
-$$
-with denominator clamped below by a positive constant in code. Therefore $\tilde{\alpha}_i\ge0$ and $\sum_i\tilde{\alpha}_i=1$.
+Step 1. Runtime mask positivity.
 
-Step 2. `_apply_joint_min_alpha` receives $\tilde{\alpha}$ and floor vector $f$.
-If $F\le0$, function returns $\tilde{\alpha}$, so simplex validity is preserved.
+Main training/probe call uses:
+$$
+\alpha=\_build\_alpha(\texttt{source\_mask}),
+$$
+where `get_source_mask` enforces fallback: if mask sum is non-positive, set source0 mask to $1$.
 
-Step 3. If $0<F<1$, code computes residual
-$$
-r_i := \max(\tilde{\alpha}_i-f_i,0),
-$$
-normalizes residual direction (or falls back to normalized $\tilde{\alpha}$ when residual is identically zero), then outputs
-$$
-\alpha_i = f_i + (1-F)\,\hat{r}_i,
-$$
-followed by normalization by its own sum (which is already positive). Since $\hat{r}_i\ge0$ and $\sum_i\hat{r}_i=1$, we have:
-$$
-\alpha_i \ge f_i,\qquad \sum_i\alpha_i=1,\qquad \alpha_i\ge0.
-$$
-So $\alpha\in\Delta^2$ and all requested floors are satisfied.
+For policy-LOO probes:
+- leave-one-out branch executes only when `source_mask.sum() > 1`;
+- add-one branch executes only when modified mask sum is $>1$.
 
-Step 4. If $F\ge1$, code returns normalized floor vector. This still yields $\alpha\in\Delta^2$. In this branch per-source floor guarantees may be weakened by normalization, so strict floor-preservation requires $F<1$. The active S3A dual-source contract avoids problematic $F>1$ via validator feasibility checks for configured floors.
+Hence all runtime `_build_alpha` calls here have strictly positive masked mass.
 
-Step 5. For source0, `_compute_dino_floor` returns
-$$
-d=\max(m,d_{\text{sched}})
-$$
-when source0 is ready and dual-source mode is active. `_build_alpha` injects this as floor on source0. By Step 3, when $F<1$, $\alpha_0\ge d\ge m$.
+Step 2. Simplex preservation in `_build_alpha`.
 
-Step 6. In add-one reopen probe, `_build_alpha(..., extra_min_alpha_by_source={1:r})` merges floors by sourcewise max, so floor vector includes at least $(d,r)$. Under $d+r\le1$, Step 3 gives:
+Given positive mass, `_build_alpha` computes:
 $$
-\alpha_0\ge d,\qquad \alpha_1\ge r.
+\tilde{\alpha}=\frac{\hat{\alpha}}{\sum_j \hat{\alpha}_j},
 $$
+thus $\tilde{\alpha}\in\Delta^2$.
 
-Step 7. Collapse boundary reachability:
-- per-probe and window-level predicates use
-$$
-\alpha_{\text{dino}} \le \texttt{s3a\_collapse\_alpha\_threshold},
-$$
-not strict $<$;
-- validator enforces
-$$
-\texttt{s3a\_collapse\_alpha\_threshold}\ge m.
-$$
-Hence floor-level equality ($\alpha_{\text{dino}}=m$) is admissible for the alpha-threshold clause, so no structural dead-zone remains at equality.
+If no floor is active, output is $\tilde{\alpha}$.
 
-Therefore claims (1)-(4) follow. ∎
+If floor is active, `_apply_joint_min_alpha` handles three cases:
+- $F\le0$: identity return.
+- $0<F<1$: output is
+$$
+\alpha=f+(1-F)\hat{r},
+$$
+with $\hat{r}\in\Delta^2$, so $\alpha\in\Delta^2$ and $\alpha_i\ge f_i$.
+- $F\ge1$: output is normalized floor vector, still in $\Delta^2$.
+
+Therefore Claim 1 holds.
+
+Step 3. Source0 floor lower bound.
+
+`_compute_dino_floor` returns $d(k)$ when source0 is active and dual-source is enabled. `_build_alpha` inserts this as floor for source0 before projection. By Step 2:
+$$
+\alpha_0\ge d(k)\ge m.
+$$
+So Claim 2 holds.
+
+Step 4. Add-one reopen floor bound.
+
+In add-one branch, floor map merges source0 floor and `extra_min_alpha_by_source={1:r}` by componentwise max. Under $d(k)+r\le1$, the feasible floor branch applies and Step 2 gives:
+$$
+\alpha_0\ge d(k),\qquad \alpha_1\ge r.
+$$
+So Claim 3 holds.
+
+Step 5. Source0 hard gate protection.
+
+In `update_gate_state`, when `protect_source0=True` and source index is $0$, code sets gate mask to $1$ and resets counters without evaluating off/on utility conditions. Therefore source0 controller lane is forced on at each update. Claim 4 holds.
+
+Step 6. Threshold-independent mitigation channel.
+
+Main loop defines:
+$$
+\alpha_{\text{dino,above-floor}}:=\max(0,\alpha_{\text{dino}}-d(k)),
+$$
+and
+$$
+\texttt{dino\_starved}=1
+$$
+when post-warmup, self alpha is high, and $\alpha_{\text{dino,above-floor}}\le\varepsilon$ (with $\varepsilon=10^{-3}$). Window aggregation gives `dino_starved_alarm`.
+
+Mitigation trigger condition includes:
+$$
+(\texttt{collapse\_alarm}>0)\ \lor\ (\texttt{dino\_starved\_alarm}>0).
+$$
+Hence `dino_starved_alarm` alone is a sufficient trigger path, which does not involve `s3a_collapse_alpha_threshold`. Claim 5 holds. $\square$
 
 ## Corrections or Missing Assumptions
-- Strict simultaneous floor guarantees in part (3) rely on $d+r\le1$ in the effective regime. This is consistent with validator intent but should remain an explicit contract assumption.
-- This proof is about alpha/gate contract correctness, not about guaranteeing global optimization quality or preventing every form of DINO underuse.
+- Previous proof text claimed validator enforced
+$$
+\texttt{s3a\_collapse\_alpha\_threshold}\ge m,
+$$
+which is no longer true in current code. That statement has been removed.
+- Current proof is purely contract-level; it does not prove optimization-level collaboration.
 
 ## Open Risks
-- The proof does not establish that collapse alarm catches all gradual underuse regimes; it only proves the floor-equality dead-zone is removed.
-- If future code paths bypass `_build_alpha`/`_apply_joint_min_alpha`, these guarantees need re-verification.
+- Proven invariants prevent exact zero-collapse by contract but do not guarantee meaningful DINO contribution above floor.
+- If future code adds new `_build_alpha` call paths without current mask guards, this proof must be revalidated.
