@@ -1308,7 +1308,7 @@ def compute_s3a_alignment_loss(
                 and
                 current_step >= args.s3a_self_warmup_steps
                 and source_ready[1] > 0
-                and alpha[:, 0].mean().item() < args.s3a_collapse_alpha_threshold
+                and alpha[:, 0].mean().item() <= args.s3a_collapse_alpha_threshold
                 and alpha[:, 1].mean().item() > args.s3a_collapse_self_threshold
                 and utility_dino_layer > args.s3a_collapse_utility_threshold
                 and fused_probe_loss_mean + args.s3a_collapse_margin < self_layer_loss_mean
@@ -2517,7 +2517,7 @@ def main(args):
                         args.s3a_use_ema_source
                         and global_self_probe_count > 0
                         and train_steps >= args.s3a_self_warmup_steps
-                        and avg_alpha_dino < args.s3a_collapse_alpha_threshold
+                        and avg_alpha_dino <= args.s3a_collapse_alpha_threshold
                         and avg_alpha_self > args.s3a_collapse_self_threshold
                         and avg_utility_dino > args.s3a_collapse_utility_threshold
                         and avg_loss_fused_probe + args.s3a_collapse_margin < avg_loss_self_only
@@ -3219,6 +3219,15 @@ def validate_args(args):
                 "Inconsistent S3A alpha floors: "
                 "max(--s3a-dino-alpha-floor, --s3a-protect-source0-min-alpha) + "
                 "--s3a-gate-reopen-probe-alpha-floor must be <= 1.0"
+            )
+        if (
+            args.s3a_use_ema_source
+            and args.s3a_enable_selective_gate
+            and args.s3a_collapse_alpha_threshold < args.s3a_protect_source0_min_alpha
+        ):
+            raise ValueError(
+                "Unreachable collapse alarm config: "
+                "--s3a-collapse-alpha-threshold must be >= --s3a-protect-source0-min-alpha."
             )
 
 

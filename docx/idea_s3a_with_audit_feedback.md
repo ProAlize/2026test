@@ -144,8 +144,13 @@ L_align = Σ_l Σ_k m_k,l * w(s,t,l) * [lf*L_feat + la*L_attn + ls*L_spatial]
 
 ### Selective Stop Gate
 对每个 `(source k, layer-group l)` 维护 mask `m_k,l in {0,1}`：
-- 监控窗口收益 `Delta = f(FID_proxy, Recall_proxy, grad_conflict)`
-- 连续 `K` 个窗口无收益，则 `m_k,l <- 0`
+- 默认采用 `policy_loo` 反事实收益估计：
+  - 若 source 当前激活：`U_k = L(without k) - L(full)`
+  - 若 source 当前关闭：`U_k = L(current) - L(add k)`
+  - 以上 `L(*)` 都在与训练同一 alpha 策略（同 router + 同 floor）下计算
+- 对 `U_k` 做 EMA + hysteresis：
+  - 连续低于 `off_threshold` 达到 `patience`，则 `m_k,l <- 0`
+  - 连续高于 `on_threshold` 达到 `reopen_patience`，则 `m_k,l <- 1`
 
 这样是局部停用，不会像全局 stop 那样粗暴。
 
@@ -233,3 +238,37 @@ S3A 不建议“所有层注入”。默认采用：
 下一步：先冻结评测口径与复现闭环，再按最小证据包执行。
 
 这能把当前“提案态”推进到“可过审稿态”。
+
+---
+
+## 12. 2026-04-15 最新问题同步（设计层）
+
+下面是本轮 dual-EMA 审计后，S3A 设计层必须承认的“未闭环点”：
+
+1. `legacy resume` 与新控制器语义不一致（P0，已修复）
+- 已实现：legacy 单轨 `source_utility_ema` 在迁移中直接丢弃，不再映射到双轨。
+- 已实现：迁移时重置 gate 计数器并记录 migration notes。
+- 设计影响：legacy resume 的控制器污染风险已显著下降。
+
+2. selective gate 的 `sticky-off` 机制风险（P1，已加保护）
+- 已实现：off-state add-one probe 支持最小探索权重 `--s3a-gate-reopen-probe-alpha-floor`。
+- 默认 `0.0`（保持兼容）；实验可打开该保护观察 reopen 恢复性。
+- 设计影响：控制器具备可配置“反锁死”探索能力。
+
+3. `protect_source0` 是 availability guard，不是 usage guarantee（P1，已加可选保护）
+- 已实现：`--s3a-protect-source0-min-alpha` 可提供 source0 使用下界。
+- 默认 `0.0` 时仍是 availability guard 语义。
+- 设计影响：仅在该参数>0 时，才能把“usage 保护”纳入机制叙事。
+
+4. flip reset 与零起点偏置（P1，已修复）
+- 已实现：进入新 regime 后 invalidate 对应 EMA，并在首个有效样本直接 seed。
+- 设计影响：避免 hard-zero 冷启动造成的 reopen 迟滞。
+
+5. 指标可解释性版本化（P1，已修复）
+- 已实现：metrics row 增加 schema/version 与语义字段（`metrics_schema_version`, `utility_ema_semantics` 等）。
+- 已实现：兼容字段 `utility_self_ema` 继续保留，明确声明为 active 轨别名。
+
+## 13. 口径更新（与论文叙事一致）
+
+- 当前可安全主张：`guarded dual-source auxiliary alignment` 的控制语义更一致、可观测性更强。
+- 当前不能主张：`principled reliability routing` 或“机制已完全解决 collapse”。
