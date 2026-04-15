@@ -986,12 +986,14 @@ def compute_s3a_alignment_loss(
                 if s3a_head.use_trainable_ema_adapters and s3a_head.ema_adapters is not None:
                     # Optional trainable self-side projector (disabled by default).
                     ema_proj = s3a_head.ema_adapters[key](ema_tokens_detached)
+                    # Keep gradient path to ema_adapters when explicitly enabled.
+                    ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1])
                 else:
                     # Use student adapter path as a frozen projector to avoid a
                     # moving self-target shortcut in default contract.
                     with torch.no_grad():
                         ema_proj = s3a_head.student_adapters[key](ema_tokens_detached)
-                ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
+                    ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
                 sources.append(ema_proj)
                 source_ready[1] = 1.0
             else:
@@ -1951,6 +1953,10 @@ def main(args):
             f"  trainable ema-adpt  : {args.s3a_trainable_ema_adapters}\n"
             f"  S3A params          : {sum(p.numel() for p in s3a_head.parameters()):,}"
         )
+        if not args.s3a_trainable_ema_adapters:
+            for name, p in s3a_head.named_parameters():
+                if name.startswith("ema_adapters."):
+                    p.requires_grad_(False)
 
     model = DDP(model, device_ids=[device])
     if args.s3a:
@@ -1961,13 +1967,6 @@ def main(args):
     s3a_frozen_param_count = 0
     if args.s3a:
         for name, p in s3a_head.named_parameters():
-            if (
-                not args.s3a_trainable_ema_adapters
-                and ".ema_adapters." in name
-            ):
-                p.requires_grad_(False)
-                s3a_frozen_param_count += p.numel()
-                continue
             if p.requires_grad:
                 trainable_params.append(p)
                 s3a_trainable_param_count += p.numel()

@@ -112,3 +112,77 @@ Same 3 agents re-audited.
   - validation failures for invalid mode/floor combinations
   completed successfully.
 
+
+## 6. DDP Unused-Parameter Fix Loop (Auto, 2026-04-15)
+
+### 6.1 Problem observed
+During dual-source canary runs, training failed at step 2 with DDP error:
+`Expected to have finished reduction in the prior iteration...`
+Missing-grad parameter indices were `56..111`, which map exactly to `ema_adapters.*`.
+
+### 6.2 Root cause
+1. `ema_adapters` trainable path was still detached before fusion, so gradients never reached `ema_adapters`.
+2. In non-trainable mode, `ema_adapters` freezing was applied after DDP wrap, which is too late for reducer membership.
+
+### 6.3 Code fixes
+1. Keep gradient path in trainable self-source branch:
+- file: `/home/liuchunfa/2026qjx/2026test/train_s3a_multisource_dinov2.py`
+- area: `compute_s3a_alignment_loss()` around lines ~986-996.
+- change: do not `.detach()` `ema_proj` when `use_trainable_ema_adapters=True`; keep detached behavior only for frozen fallback path.
+
+2. Freeze `ema_adapters` before DDP construction when non-trainable:
+- file: `/home/liuchunfa/2026qjx/2026test/train_s3a_multisource_dinov2.py`
+- area: model setup around lines ~1956+.
+- change: move `ema_adapters` requires_grad false logic to pre-DDP stage; remove post-DDP mutation branch.
+
+### 6.4 Multi-agent review (research-review, xhigh)
+Agents:
+- Mechanism: `019d8d62-3e02-71d0-9f15-d4dfef00e734`
+- Engineering: `019d8d62-3e44-73f3-9598-a21a2273e52f`
+- AC-style: `019d8d62-3e96-7e00-a7fb-b6cb571532d3`
+
+Converged result:
+- No `P0/P1` blockers.
+- Accepted for controlled rollout.
+- One `P2` note: abnormal partial tap-capture could still create DDP brittleness, but not expected in normal configured runs.
+
+### 6.5 Runtime verification
+1. Dual-source canary (after fix) completed successfully:
+- run dir:
+`/tmp/s3a_effective_dualsrc_fix_20260415_030431/DiT-S-8-seed0-20260415-030439-51bbfc-s3a-dinov2-lam0.1-traincosine_decay-diffcosine`
+- reached `max_steps=6` and exited normally.
+- checkpoints created:
+  - `checkpoints/0000003.pt` (+ sha256 sidecar)
+  - `checkpoints/0000006.pt` (+ sha256 sidecar)
+
+2. Metrics/logs confirmed:
+- `utility_probe_mode=policy_loo`
+- dual-source active (`alpha_self` non-zero, `gate_self=1.0` in run)
+- no DDP reduction error after fix.
+
+### 6.6 Status
+DDP unused-parameter issue is closed for normal dual-source training path.
+
+## 7. Final Post-Review Verification (2026-04-15)
+
+### 7.1 Final review summary
+A second targeted 3-agent review on the DDP fix converged to:
+- no `P0/P1` blockers,
+- accepted for controlled dual-source rollout,
+- one `P2` residual note only for abnormal partial tap-capture edge cases.
+
+### 7.2 Post-review run (required final check)
+Executed dual-source S3A short run **after review**:
+- run dir:
+`/tmp/s3a_postreview_dualsrc_20260415_160008/DiT-S-8-seed0-20260415-160016-e36d5a-s3a-dinov2-lam0.1-traincosine_decay-diffcosine`
+- config highlights:
+  - `--s3a-trainable-ema-adapters`
+  - `--s3a-self-warmup-steps 0 --s3a-allow-unsafe-zero-warmup`
+  - `--max-steps 3`
+- result:
+  - completed to max_steps without DDP reduction error,
+  - checkpoint written with sha256 manifest:
+    - `checkpoints/0000003.pt`
+    - `checkpoints/0000003.pt.sha256.json`
+
+Conclusion: the specific DDP unused-parameter failure is resolved in practical dual-source execution.
