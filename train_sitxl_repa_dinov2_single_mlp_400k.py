@@ -315,12 +315,11 @@ def preprocess_for_dino(x: torch.Tensor) -> torch.Tensor:
 
 class REPAProjector(nn.Module):
     """
-    单层线性投影，将 SiT 中间 token 投影到 DINOv2 特征空间。
-    结构：Linear（与 REPA 官方单层对齐）
+    单层线性投影（消融对照）：验证 projector 容量对对齐的影响。
+    结构：Linear（无隐层、无激活函数）
     """
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = None):
         super().__init__()
-        # hidden_dim 参数保留但不使用，保持接口兼容
         self.net = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):

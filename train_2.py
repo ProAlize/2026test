@@ -119,16 +119,14 @@ def center_crop_arr(pil_image, image_size):
 
 
 class REPAProjector(nn.Module):
-    """
-    Project DiT tokens to DINO token feature space.
-    """
-    def __init__(self, in_dim, out_dim, hidden_dim=None):
+    """3-layer MLP projector (REPA build_mlp): Linear→SiLU→Linear→SiLU→Linear."""
+    def __init__(self, in_dim, out_dim, hidden_dim=2048):
         super().__init__()
-        if hidden_dim is None:
-            hidden_dim = in_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, out_dim),
         )
 

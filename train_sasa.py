@@ -101,14 +101,14 @@ def center_crop_arr(pil_image, image_size):
 
 
 class REPAProjector(nn.Module):
-    """Project DiT tokens to DINO token feature space."""
-    def __init__(self, in_dim, out_dim, hidden_dim=None):
+    """3-layer MLP projector (REPA build_mlp): Linear→SiLU→Linear→SiLU→Linear."""
+    def __init__(self, in_dim, out_dim, hidden_dim=2048):
         super().__init__()
-        if hidden_dim is None:
-            hidden_dim = in_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, out_dim),
         )
 
@@ -300,11 +300,11 @@ def main(args):
         dit_hidden_dim = model.hidden_size
         dit_depth      = model.depth
 
-        # 默认 hook 最后一个 block
+        # REPA 原版 encoder_depth=8，即从第 8 个 block (0-indexed: 7) 提取 token
         hook_layer_idx = (
             args.repa_token_layer
             if args.repa_token_layer is not None
-            else dit_depth - 1
+            else min(7, dit_depth - 1)
         )
 
         with torch.inference_mode():
@@ -495,6 +495,11 @@ def main(args):
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            if hasattr(args, 'max_grad_norm') and args.max_grad_norm is not None:
+                params = list(model.parameters())
+                if args.repa:
+                    params += list(repa_projector.parameters())
+                torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             opt.step()
             update_ema(ema, model.module)
 
@@ -624,17 +629,19 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt-every",     type=int, default=10_000)
     parser.add_argument("--lr",             type=float, default=1e-4)
     parser.add_argument("--weight-decay",   type=float, default=0.0)
+    parser.add_argument("--max-grad-norm",  type=float, default=1.0,
+                        help="Gradient clipping max norm (REPA default=1.0).")
 
     # SASA / REPA args
     parser.add_argument("--repa", action="store_true",
                         help="Enable SASA alignment.")
-    parser.add_argument("--repa-lambda",    type=float, default=0.1,
-                        help="Base weight for alignment loss.")
+    parser.add_argument("--repa-lambda",    type=float, default=0.5,
+                        help="Base weight for alignment loss (REPA proj_coeff=0.5).")
     parser.add_argument("--repa-token-layer", type=int, default=None,
                         help="DiT block index to hook for token extraction. "
-                             "Default: last block.")
-    parser.add_argument("--repa-hidden-dim",  type=int, default=None,
-                        help="Hidden dim of REPA projector MLP.")
+                             "Default: block 7 (REPA encoder_depth=8).")
+    parser.add_argument("--repa-hidden-dim",  type=int, default=2048,
+                        help="Hidden dim of REPA projector MLP (REPA projector_dim=2048).")
     parser.add_argument(
         "--repa-train-schedule", type=str,
         choices=["constant", "linear_decay", "cutoff"],

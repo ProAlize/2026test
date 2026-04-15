@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.amp import autocast, GradScaler
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
 
@@ -109,12 +110,13 @@ def get_train_phase_weight(
     current_step: int,
     schedule_steps: int,
     schedule: str = "cosine_decay",
+    warmup_steps: int = 0,
 ) -> float:
     """
     训练步数驱动的对齐权重（训练阶段衰减）。
     与扩散时间步加权相互独立，最终有效 lambda = base_lambda × 本函数返回值。
 
-    支持四种模式
+    支持五种模式
     ------------
     constant     : 始终返回 1.0，全程保持固定对齐压力
     linear_decay : w = 1 - t/T
@@ -124,38 +126,49 @@ def get_train_phase_weight(
                    特点：前期衰减慢（充分对齐建立表征），
                          后期衰减快（快速退出专注生成质量）
     cutoff       : 前 schedule_steps 步返回 1.0，之后返回 0.0
+    three_phase  : 三阶段调度（需配合 warmup_steps 参数）
+                   [0, warmup_steps)           : w = 1.0（全力对齐）
+                   [warmup_steps, schedule_steps) : 线性衰减 1.0 → 0.0
+                   [schedule_steps, ...)        : w = 0.0（纯生成训练）
 
-    数值对比（T=40000步，部分节点）
-    --------------------------------
-    step  | linear | cosine
-    ------+--------+-------
-    0     | 1.000  | 1.000
-    8k    | 0.800  | 0.905   ← cosine前期权重更高
-    20k   | 0.500  | 0.500   ← 中点相同
-    32k   | 0.200  | 0.095   ← cosine后期权重更低
-    40k   | 0.000  | 0.000
+    示例（three_phase, warmup_steps=100k, schedule_steps=300k, 总训练400k）
+    ────────────────────────────────────
+    step  | weight
+    ------+--------
+    0     | 1.000
+    50k   | 1.000   ← warmup 阶段全力
+    100k  | 1.000   ← warmup 结束
+    200k  | 0.500   ← 线性衰减中点
+    300k  | 0.000   ← 衰减结束
+    400k  | 0.000   ← 纯生成训练
     """
     if schedule == "constant":
         return 1.0
 
-    # 归一化进度 progress ∈ [0, 1]
+    if schedule == "three_phase":
+        if current_step < warmup_steps:
+            return 1.0
+        elif current_step < schedule_steps:
+            decay_progress = (current_step - warmup_steps) / max(1, schedule_steps - warmup_steps)
+            return 1.0 - decay_progress
+        else:
+            return 0.0
+
+    # 以下模式不使用 warmup_steps
     progress = min(max(current_step / max(1, schedule_steps), 0.0), 1.0)
 
     if schedule == "linear_decay":
-        # 线性：均匀衰减
         return 1.0 - progress
 
     if schedule == "cosine_decay":
-        # 半周期余弦：平滑衰减，前慢后快
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     if schedule == "cutoff":
-        # 硬截断：前段全开，后段全关
         return 1.0 if current_step < schedule_steps else 0.0
 
     raise ValueError(
         f"Unknown train schedule: {schedule!r}. "
-        "Choose from: constant, linear_decay, cosine_decay, cutoff."
+        "Choose from: constant, linear_decay, cosine_decay, cutoff, three_phase."
     )
 
 
@@ -373,26 +386,80 @@ def preprocess_for_dino(x: torch.Tensor) -> torch.Tensor:
 
 
 #################################################################################
-#                          REPA Projector                                       #
+#                          REPA / iREPA Projector                               #
 #################################################################################
 
 class REPAProjector(nn.Module):
     """
-    两层 MLP，将 DiT 中间 token 投影到 DINOv2 特征空间。
-    结构：Linear → GELU → Linear（与 REPA 原版一致）
+    三层 MLP，将 DiT 中间 token 投影到 DINOv2 特征空间。
+    结构：Linear → SiLU → Linear → SiLU → Linear（与 REPA 原版 build_mlp 一致）
     """
-    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = None):
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = 2048):
         super().__init__()
-        if hidden_dim is None:
-            hidden_dim = in_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, out_dim),
         )
 
     def forward(self, x):
         return self.net(x)
+
+
+class IREPAProjector(nn.Module):
+    """
+    iREPA (ICLR 2026) 的卷积投影器。
+    用 Conv2d(kernel=3) 替代 MLP，天然保留空间局部结构。
+    输入 token 序列需 reshape 为 2D grid 后卷积，再 flatten 回序列。
+    """
+    def __init__(self, in_dim: int, out_dim: int, grid_size: int = 16):
+        super().__init__()
+        self.grid_size = grid_size
+        self.conv = nn.Conv2d(
+            in_dim, out_dim, kernel_size=3, padding=1,
+        )
+
+    def forward(self, x):
+        # x: [B, N, D]  (N = grid_size²)
+        B, N, D = x.shape
+        h = w = self.grid_size
+        x = x.transpose(1, 2).reshape(B, D, h, w)    # [B, D, h, w]
+        x = self.conv(x)                               # [B, out_dim, h, w]
+        x = x.reshape(B, -1, N).transpose(1, 2)       # [B, N, out_dim]
+        return x
+
+
+def spatial_normalize(x: torch.Tensor, gamma: float = 1.0) -> torch.Tensor:
+    """
+    iREPA spatial normalization：去除 teacher feature 的全局分量，增强空间对比度。
+    x: [B, N, D]，N 为 token 维度
+    y = (x - γ * mean_N(x)) / (std_N(x) + ε)
+    """
+    mean = x.mean(dim=1, keepdim=True)        # [B, 1, D]
+    x = x - gamma * mean
+    std = x.std(dim=1, keepdim=True) + 1e-6   # [B, 1, D]
+    return x / std
+
+
+def build_projector(
+    projector_type: str,
+    in_dim: int,
+    out_dim: int,
+    hidden_dim: int = 2048,
+    grid_size: int = 16,
+) -> nn.Module:
+    """根据 projector_type 构建对应投影器。"""
+    if projector_type == "repa":
+        return REPAProjector(in_dim, out_dim, hidden_dim)
+    elif projector_type == "irepa":
+        return IREPAProjector(in_dim, out_dim, grid_size)
+    else:
+        raise ValueError(
+            f"Unknown projector_type: {projector_type!r}. "
+            "Choose from: repa, irepa."
+        )
 
 
 #################################################################################
@@ -530,10 +597,11 @@ def main(args):
         dit_depth      = model.depth
 
         # hook 注入的 DiT block 索引（默认最后一层）
+        # REPA 原版 encoder_depth=8，即从第 8 个 block (0-indexed: 7) 提取 token
         hook_layer_idx = (
             args.repa_token_layer
             if args.repa_token_layer is not None
-            else dit_depth - 1
+            else min(7, dit_depth - 1)
         )
 
         # dummy forward 探测 DINO 输出维度
@@ -551,13 +619,17 @@ def main(args):
             f"  DiT hidden_dim  : {dit_hidden_dim}\n"
             f"  DINO dim        : {dino_dim}\n"
             f"  DINO num_tokens : {dino_num_tokens}\n"
-            f"  hook block      : [{hook_layer_idx} / {dit_depth - 1}]"
+            f"  hook block      : [{hook_layer_idx} / {dit_depth - 1}]\n"
+            f"  projector_type  : {args.projector_type}"
         )
 
-        repa_projector = REPAProjector(
+        grid_size = int(dino_num_tokens ** 0.5)  # 16 for 256 tokens
+        repa_projector = build_projector(
+            projector_type=args.projector_type,
             in_dim=dit_hidden_dim,
             out_dim=dino_dim,
             hidden_dim=args.repa_hidden_dim,
+            grid_size=grid_size,
         ).to(device)
 
         logger.info(
@@ -580,6 +652,14 @@ def main(args):
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
+
+    # ── Mixed Precision（与 REPA 原版 fp16 一致）──────────────────────────
+    scaler = GradScaler("cuda", enabled=args.mixed_precision == "fp16")
+    mp_dtype = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "no":   torch.float32,
+    }[args.mixed_precision]
 
     # ── 数据集 ────────────────────────────────────────────────────────────
     transform = transforms.Compose([
@@ -684,6 +764,7 @@ def main(args):
                     current_step=current_step,
                     schedule_steps=args.repa_schedule_steps,
                     schedule=args.repa_train_schedule,
+                    warmup_steps=args.repa_warmup_steps,
                 )
 
             # ── 注册 forward hook（仅对齐期间） ──────────────────────────
@@ -706,8 +787,9 @@ def main(args):
             t = torch.randint(0, T, (x.shape[0],), device=device).long()
             model_kwargs = dict(y=y)
 
-            loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-            loss_diff = loss_dict["loss"].mean()
+            with autocast("cuda", dtype=mp_dtype, enabled=(args.mixed_precision != "no")):
+                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
+                loss_diff = loss_dict["loss"].mean()
 
             # hook 触发后立即移除，避免影响后续步骤
             if hook_handle is not None:
@@ -730,6 +812,10 @@ def main(args):
                 with torch.inference_mode():
                     # LocalDINOv2Teacher 内部自动 resize 到 224×224
                     dino_tokens = dino_model(x_dino)        # [B, 256, 768]
+
+                # iREPA: 对 teacher features 做 spatial normalization
+                if args.projector_type == "irepa":
+                    dino_tokens = spatial_normalize(dino_tokens)
 
                 # Projector：DiT token → DINOv2 特征空间
                 proj_tokens = repa_projector(dit_tokens)    # [B, N_tok, 768]
@@ -771,8 +857,14 @@ def main(args):
             loss = loss_diff + effective_repa_lambda * loss_align
 
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            scaler.scale(loss).backward()
+            if args.max_grad_norm is not None:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(
+                    trainable_params, args.max_grad_norm
+                )
+            scaler.step(opt)
+            scaler.update()
             update_ema(ema, model.module)
 
             # ── 日志累计 ──────────────────────────────────────────────────
@@ -945,8 +1037,8 @@ if __name__ == "__main__":
         help="全局随机种子。",
     )
     parser.add_argument(
-        "--vae", type=str, choices=["ema", "mse"], default="ema",
-        help="VAE 变体（HuggingFace Hub）。若设置 --vae-model-dir 则忽略。",
+        "--vae", type=str, choices=["ema", "mse"], default="mse",
+        help="VAE 变体（REPA 原版用 mse）。若设置 --vae-model-dir 则忽略。",
     )
     parser.add_argument(
         "--vae-model-dir", type=str, default=None,
@@ -971,6 +1063,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--weight-decay", type=float, default=0.0,
         help="AdamW weight decay。",
+    )
+    parser.add_argument(
+        "--max-grad-norm", type=float, default=1.0,
+        help="梯度裁剪最大范数（REPA 原版 max_grad_norm=1.0）。设为 None 禁用。",
+    )
+    parser.add_argument(
+        "--mixed-precision", type=str,
+        choices=["no", "fp16", "bf16"], default="fp16",
+        help="Mixed precision 训练（REPA 原版用 fp16）。",
     )
 
     # ── DINOv2 路径参数 ────────────────────────────────────────────────
@@ -997,20 +1098,29 @@ if __name__ == "__main__":
         help="启用 REPA 表征对齐。",
     )
     parser.add_argument(
-        "--repa-lambda", type=float, default=0.1,
-        help="对齐 loss 的基础权重 λ。有效 λ = repa_lambda × train_phase_weight。",
+        "--projector-type", type=str,
+        choices=["repa", "irepa"], default="repa",
+        help=(
+            "投影器类型:\n"
+            "  repa  : 3-layer MLP (Linear→SiLU→Linear→SiLU→Linear) [REPA 原版]\n"
+            "  irepa : Conv2d(k=3) + spatial normalization [iREPA, ICLR 2026]"
+        ),
+    )
+    parser.add_argument(
+        "--repa-lambda", type=float, default=0.5,
+        help="对齐 loss 的基础权重 λ（REPA 原版 proj_coeff=0.5）。有效 λ = repa_lambda × train_phase_weight。",
     )
     parser.add_argument(
         "--repa-token-layer", type=int, default=None,
         help="用于提取中间 token 的 DiT block 索引。默认：最后一层。",
     )
     parser.add_argument(
-        "--repa-hidden-dim", type=int, default=None,
-        help="Projector MLP 隐层维度。默认：DiT hidden_size。",
+        "--repa-hidden-dim", type=int, default=2048,
+        help="Projector MLP 隐层维度（REPA 原版 projector_dim=2048）。",
     )
     parser.add_argument(
         "--repa-train-schedule", type=str,
-        choices=["constant", "linear_decay", "cosine_decay", "cutoff"],
+        choices=["constant", "linear_decay", "cosine_decay", "cutoff", "three_phase"],
         default="cosine_decay",
         help=(
             "训练步数权重调度（训练阶段轴）:\n"
@@ -1018,14 +1128,24 @@ if __name__ == "__main__":
             "  linear_decay : w 从 1→0 线性衰减\n"
             "  cosine_decay : w 从 1→0 余弦衰减（推荐）\n"
             "                 前期衰减慢（充分对齐），后期快速退出\n"
-            "  cutoff       : 前N步 w=1，之后 w=0"
+            "  cutoff       : 前N步 w=1，之后 w=0\n"
+            "  three_phase  : [0,warmup)=1.0 → [warmup,schedule_steps)=线性衰减 → [schedule_steps,∞)=0"
+        ),
+    )
+    parser.add_argument(
+        "--repa-warmup-steps", type=int, default=0,
+        help=(
+            "three_phase 模式下的 warmup 步数。\n"
+            "例如 --repa-warmup-steps 100000 --repa-schedule-steps 300000\n"
+            "表示 0-100k 全力对齐，100k-300k 线性衰减，300k+ 权重为 0。"
         ),
     )
     parser.add_argument(
         "--repa-schedule-steps", type=int, default=40_000,
         help=(
-            "训练步数衰减周期 T（train_phase 轴）。\n"
-            "linear_decay / cosine_decay 在此步数内从 1.0 衰减到 0.0。"
+            "训练步数衰减终点（train_phase 轴）。\n"
+            "linear_decay / cosine_decay: 在此步数内从 1.0 衰减到 0.0。\n"
+            "three_phase: warmup 后到此步数线性衰减到 0。"
         ),
     )
     parser.add_argument(

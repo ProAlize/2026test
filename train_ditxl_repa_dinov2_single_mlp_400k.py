@@ -379,8 +379,8 @@ def preprocess_for_dino(x: torch.Tensor) -> torch.Tensor:
 
 class REPAProjector(nn.Module):
     """
-    单层线性投影，将 SiT 中间 token 投影到 DINOv2 特征空间。
-    结构：Linear（与 REPA 官方单层对齐）
+    单层线性投影（消融对照）：验证 projector 容量对对齐的影响。
+    结构：Linear（无隐层、无激活函数）
     """
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = None):
         super().__init__()
@@ -527,10 +527,11 @@ def main(args):
         dit_depth      = model.depth
 
         # hook 注入的 DiT block 索引（默认最后一层）
+        # REPA 原版 encoder_depth=8，即从第 8 个 block (0-indexed: 7) 提取 token
         hook_layer_idx = (
             args.repa_token_layer
             if args.repa_token_layer is not None
-            else dit_depth - 1
+            else min(7, dit_depth - 1)
         )
 
         # dummy forward 探测 DINO 输出维度
@@ -769,6 +770,10 @@ def main(args):
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            if args.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    trainable_params, args.max_grad_norm
+                )
             opt.step()
             update_ema(ema, model.module)
 
@@ -969,6 +974,11 @@ if __name__ == "__main__":
         "--weight-decay", type=float, default=0.0,
         help="AdamW weight decay。",
     )
+    parser.add_argument(
+        "--max-grad-norm", type=float, default=1.0,
+        help="梯度裁剪最大范数（REPA 原版 max_grad_norm=1.0）。",
+        help="AdamW weight decay。",
+    )
 
     # ── DINOv2 路径参数 ────────────────────────────────────────────────
     parser.add_argument(
@@ -994,16 +1004,16 @@ if __name__ == "__main__":
         help="启用 REPA 表征对齐。",
     )
     parser.add_argument(
-        "--repa-lambda", type=float, default=0.1,
-        help="对齐 loss 的基础权重 λ。有效 λ = repa_lambda × train_phase_weight。",
+        "--repa-lambda", type=float, default=0.5,
+        help="对齐 loss 的基础权重 λ（REPA 原版 proj_coeff=0.5）。有效 λ = repa_lambda × train_phase_weight。",
     )
     parser.add_argument(
         "--repa-token-layer", type=int, default=None,
         help="用于提取中间 token 的 DiT block 索引。默认：最后一层。",
     )
     parser.add_argument(
-        "--repa-hidden-dim", type=int, default=None,
-        help="Projector MLP 隐层维度。默认：DiT hidden_size。",
+        "--repa-hidden-dim", type=int, default=2048,
+        help="Projector MLP 隐层维度（REPA 原版 projector_dim=2048）。",
     )
     parser.add_argument(
         "--repa-train-schedule", type=str,

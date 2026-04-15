@@ -170,6 +170,7 @@ def main(args):
             samples = diffusion.p_sample_loop(
                 model.forward_with_cfg,         # 使用 CFG forward
                 z_combined.shape,
+                noise=z_combined,               # CFG 两路必须共享初始噪声
                 clip_denoised=False,
                 model_kwargs=model_kwargs,
                 device=device,
