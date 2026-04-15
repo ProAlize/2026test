@@ -14,6 +14,7 @@ VAE_MODEL_DIR="${VAE_MODEL_DIR:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/2
 
 DINOV2_REPO_DIR="${DINOV2_REPO_DIR:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/tmp/dinov2}"
 DINOV2_WEIGHT_PATH="${DINOV2_WEIGHT_PATH:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/tmp/dinov2_weights/dinov2_vitb14_pretrain.pth}"
+DINOV2_MODEL_VARIANT="${DINOV2_MODEL_VARIANT:-vitb14}"
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
@@ -161,6 +162,7 @@ echo "Mitigation       : auto=$S3A_COLLAPSE_AUTO_MITIGATE, hold=$S3A_COLLAPSE_MI
 echo "Train EMA adapter: $S3A_TRAINABLE_EMA_ADAPTERS"
 echo "DINOv2 repo      : $DINOV2_REPO_DIR"
 echo "DINOv2 weight    : $DINOV2_WEIGHT_PATH"
+echo "DINOv2 variant   : $DINOV2_MODEL_VARIANT"
 echo "VAE              : $VAE_MODEL_DIR"
 [[ -n "$S3A_LAYER_WEIGHTS" ]] && echo "S3A layer weights: $S3A_LAYER_WEIGHTS"
 [[ -n "$RESUME_CKPT" ]] && echo "Resume checkpoint: $RESUME_CKPT"
@@ -257,6 +259,7 @@ env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         --s3a-collapse-mitigate-cooldown-windows "$S3A_COLLAPSE_MITIGATE_COOLDOWN_WINDOWS" \
         --dinov2-repo-dir "$DINOV2_REPO_DIR" \
         --dinov2-weight-path "$DINOV2_WEIGHT_PATH" \
+        --dinov2-model-variant "$DINOV2_MODEL_VARIANT" \
         "${OPTIONAL_ARGS[@]}" \
         "$@" \
     2>&1 | tee "$LAUNCH_LOG"

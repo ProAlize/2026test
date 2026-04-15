@@ -65,6 +65,17 @@ def update_ema(ema_model, model, decay=0.9999):
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 
+@torch.no_grad()
+def update_ema_adapters(ema_adapters: nn.ModuleDict, student_adapters: nn.ModuleDict, decay: float = 0.999):
+    """EMA-update ema_adapters from student_adapters so the self-source
+    projection tracks the student adapter without sharing the exact same weights."""
+    for key in ema_adapters:
+        ema_params = OrderedDict(ema_adapters[key].named_parameters())
+        src_params = OrderedDict(student_adapters[key].named_parameters())
+        for name, param in src_params.items():
+            ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+
+
 def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
@@ -383,9 +394,17 @@ def affinity_loss_per_sample(
 def spatial_loss_per_sample(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
     Structure-consistency loss on per-token energy map and local gradients.
+
+    Energy maps are mean-normalized before comparison so the loss captures
+    spatial *structure* rather than absolute scale differences between the
+    student adapter output and the teacher features.
     """
     pred_energy = pred.norm(dim=-1)
     target_energy = target.norm(dim=-1)
+
+    # Mean-normalize energy maps to remove scale mismatch.
+    pred_energy = pred_energy / pred_energy.mean(dim=-1, keepdim=True).clamp(min=1e-8)
+    target_energy = target_energy / target_energy.mean(dim=-1, keepdim=True).clamp(min=1e-8)
 
     src_hw = _sqrt_hw(pred.shape[1])
     dst_hw = _sqrt_hw(target.shape[1])
@@ -482,18 +501,39 @@ def make_empty_align_stats(layer_indices: List[int]) -> Dict[str, Any]:
 #################################################################################
 
 
+# Supported DINOv2 model variants and their properties.
+DINOV2_VARIANTS = {
+    "vitb14": {"hub_name": "dinov2_vitb14", "embed_dim": 768,  "patch_size": 14},
+    "vitl14": {"hub_name": "dinov2_vitl14", "embed_dim": 1024, "patch_size": 14},
+    "vitg14": {"hub_name": "dinov2_vitg14", "embed_dim": 1536, "patch_size": 14},
+}
+
+
 class LocalDINOv2Teacher(nn.Module):
     EXPECTED_PATCH_TOKENS = 256
 
-    def __init__(self, dinov2_repo_dir: str, weight_path: str):
+    def __init__(
+        self,
+        dinov2_repo_dir: str,
+        weight_path: str,
+        model_variant: str = "vitb14",
+    ):
         super().__init__()
+        if model_variant not in DINOV2_VARIANTS:
+            raise ValueError(
+                f"Unknown --dinov2-model-variant: {model_variant!r}. "
+                f"Choose from: {list(DINOV2_VARIANTS.keys())}"
+            )
+        variant_info = DINOV2_VARIANTS[model_variant]
+        self.embed_dim = variant_info["embed_dim"]
+        self.model_variant = model_variant
 
         if dinov2_repo_dir not in sys.path:
             sys.path.insert(0, dinov2_repo_dir)
 
         self.model = torch.hub.load(
             dinov2_repo_dir,
-            "dinov2_vitb14",
+            variant_info["hub_name"],
             source="local",
             pretrained=False,
         )
@@ -1065,16 +1105,23 @@ def compute_s3a_alignment_loss(
             if key in ema_tokens:
                 ema_tokens_detached = ema_tokens[key].detach().clone()
                 if s3a_head.use_trainable_ema_adapters and s3a_head.ema_adapters is not None:
-                    # Optional trainable self-side projector (disabled by default).
+                    # Trainable self-side projector with gradient.
                     ema_proj = s3a_head.ema_adapters[key](ema_tokens_detached)
-                    # Keep gradient path to ema_adapters when explicitly enabled.
                     ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1])
                 else:
-                    # Use student adapter path as a frozen projector to avoid a
-                    # moving self-target shortcut in default contract.
-                    with torch.no_grad():
-                        ema_proj = s3a_head.student_adapters[key](ema_tokens_detached)
-                    ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
+                    # Use the INDEPENDENT ema_adapters (frozen copy) to project
+                    # EMA tokens.  This avoids the self-alignment shortcut where
+                    # pred ≈ ema_proj trivially because same adapter + similar
+                    # inputs produces near-identical outputs.
+                    if s3a_head.ema_adapters is not None:
+                        with torch.no_grad():
+                            ema_proj = s3a_head.ema_adapters[key](ema_tokens_detached)
+                        ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
+                    else:
+                        # Fallback: no ema_adapters module exists.
+                        with torch.no_grad():
+                            ema_proj = s3a_head.student_adapters[key](ema_tokens_detached)
+                        ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
                 sources.append(ema_proj)
                 source_ready[1] = 1.0
             else:
@@ -1606,6 +1653,7 @@ def _validate_resume_contract(
         "num_workers",
         "vae_model_dir",
         "dinov2_weight_path",
+        "dinov2_model_variant",
         "s3a",
         "s3a_use_ema_source",
         "s3a_trainable_ema_adapters",
@@ -1652,12 +1700,15 @@ def _validate_resume_contract(
         # Added after legacy checkpoints; safe to backfill from current args.
         "s3a_allow_unsafe_zero_source0_floor",
         "s3a_router_policy_kl_lambda",
+        "dinov2_model_variant",
     }
     backward_compatible_missing_defaults = {
         # For boolean contract flags, require legacy-equivalent default.
         "s3a_allow_unsafe_zero_source0_floor": False,
         # Objective-changing router regularizer: old checkpoints were equivalent to 0.0.
         "s3a_router_policy_kl_lambda": 0.0,
+        # Legacy checkpoints always used vitb14.
+        "dinov2_model_variant": "vitb14",
     }
     mismatches = []
     missing_keys = []
@@ -2021,13 +2072,14 @@ def main(args):
 
     if args.s3a:
         logger.info(
-            "Initializing S3A alignment with DINOv2 ViT-B/14 teacher\n"
+            f"Initializing S3A alignment with DINOv2 {args.dinov2_model_variant} teacher\n"
             f"  train_schedule      : {args.s3a_train_schedule} "
             f"(decay over {args.s3a_schedule_steps} steps)\n"
             f"  diff_schedule       : {args.s3a_diff_schedule}\n"
             f"  s3a_lambda          : {args.s3a_lambda}\n"
             f"  use_ema_source      : {args.s3a_use_ema_source}\n"
             f"  selective_gate      : {args.s3a_enable_selective_gate}\n"
+            f"  DINOv2 variant      : {args.dinov2_model_variant}\n"
             f"  DINOv2 repo         : {args.dinov2_repo_dir}\n"
             f"  DINOv2 weight       : {args.dinov2_weight_path}"
         )
@@ -2035,6 +2087,7 @@ def main(args):
         dino_model = LocalDINOv2Teacher(
             dinov2_repo_dir=args.dinov2_repo_dir,
             weight_path=args.dinov2_weight_path,
+            model_variant=args.dinov2_model_variant,
         ).to(device)
         dino_model.eval()
         requires_grad(dino_model, False)
@@ -2070,14 +2123,23 @@ def main(args):
         logger.info(
             f"S3A setup:\n"
             f"  DiT hidden_dim      : {dit_hidden_dim}\n"
+            f"  DINO variant        : {args.dinov2_model_variant}\n"
             f"  DINO dim            : {dino_dim}\n"
             f"  DINO num_tokens     : {dino_num_tokens}\n"
+            f"  adapter hidden_dim  : {args.s3a_adapter_hidden_dim}\n"
             f"  layer indices       : {s3a_layer_indices}\n"
             f"  layer weights       : {[round(w, 4) for w in s3a_layer_weights]}\n"
             f"  trainable ema-adpt  : {args.s3a_trainable_ema_adapters}\n"
             f"  S3A params          : {sum(p.numel() for p in s3a_head.parameters()):,}"
         )
         if not args.s3a_trainable_ema_adapters:
+            # Initialize ema_adapters from student_adapters (identical starting
+            # point) and freeze them.  They will be updated via
+            # update_ema_adapters() after each optimizer step, NOT by backprop.
+            if s3a_head.ema_adapters is not None:
+                for key in s3a_head.student_adapters:
+                    sd = s3a_head.student_adapters[key].state_dict()
+                    s3a_head.ema_adapters[key].load_state_dict(sd)
             for name, p in s3a_head.named_parameters():
                 if name.startswith("ema_adapters."):
                     p.requires_grad_(False)
@@ -2527,6 +2589,16 @@ def main(args):
                     continue
             opt.step()
             update_ema(ema, model.module)
+            if (
+                args.s3a
+                and args.s3a_use_ema_source
+                and not args.s3a_trainable_ema_adapters
+                and s3a_head.module.ema_adapters is not None
+            ):
+                update_ema_adapters(
+                    s3a_head.module.ema_adapters,
+                    s3a_head.module.student_adapters,
+                )
 
             running_loss += loss.item()
             running_loss_diff += loss_diff.item()
@@ -3034,8 +3106,9 @@ def main(args):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DiT + S3A training with DINOv2 ViT-B/14 teacher.\n"
-            "S3A: multi-layer multi-source alignment branch with dynamic routing."
+            "DiT + S3A training with DINOv2 teacher.\n"
+            "S3A: multi-layer multi-source alignment branch with dynamic routing.\n"
+            "Supports DINOv2 ViT-B/14, ViT-L/14, and ViT-G/14 via --dinov2-model-variant."
         )
     )
 
@@ -3100,7 +3173,17 @@ def build_parser() -> argparse.ArgumentParser:
             "/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/"
             "tmp/dinov2/dinov2_weights/dinov2_vitb14_pretrain.pth"
         ),
-        help="DINOv2 ViT-B/14 checkpoint path.",
+        help="DINOv2 checkpoint path (.pth).",
+    )
+    parser.add_argument(
+        "--dinov2-model-variant",
+        type=str,
+        choices=list(DINOV2_VARIANTS.keys()),
+        default="vitb14",
+        help=(
+            "DINOv2 model variant. vitb14 (768-d, default), "
+            "vitl14 (1024-d), vitg14 (1536-d)."
+        ),
     )
 
     parser.add_argument("--s3a", action="store_true", help="Enable S3A alignment branch.")
@@ -3125,7 +3208,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Custom per-layer weights CSV, used when --s3a-layer-weight-mode=custom.",
     )
 
-    parser.add_argument("--s3a-adapter-hidden-dim", type=int, default=None)
+    parser.add_argument(
+        "--s3a-adapter-hidden-dim",
+        type=int,
+        default=2048,
+        help=(
+            "Hidden dimension for SpatiallyFaithfulAdapter. "
+            "Default 2048 matches REPA projector width."
+        ),
+    )
     parser.add_argument("--s3a-router-hidden-dim", type=int, default=256)
     parser.add_argument(
         "--s3a-router-detach-input",
