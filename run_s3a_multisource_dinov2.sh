@@ -198,10 +198,13 @@ if [[ "$S3A_COLLAPSE_AUTO_MITIGATE" == "1" ]]; then
 else
     OPTIONAL_ARGS+=(--no-s3a-collapse-auto-mitigate)
 fi
+# Pin dual-source and selective-gate booleans explicitly.
+OPTIONAL_ARGS+=(--s3a-use-ema-source)
+OPTIONAL_ARGS+=(--s3a-enable-selective-gate)
 
 for arg in "$@"; do
     case "$arg" in
-        --s3a-*|--data-path|--results-dir|--model|--image-size|--global-batch-size|--global-seed|--num-workers|--epochs|--max-steps|--ckpt-every|--log-every|--vae-model-dir|--dinov2-repo-dir|--dinov2-weight-path|--resume|--allow-missing-manifest|--allow-legacy-resume-args)
+        --s3a-*|--data-path|--results-dir|--model|--image-size|--global-batch-size|--global-seed|--num-workers|--epochs|--max-steps|--ckpt-every|--log-every|--vae-model-dir|--dinov2-repo-dir|--dinov2-weight-path|--dinov2-model-variant|--resume|--allow-missing-manifest|--allow-legacy-resume-args)
             echo "[ERROR] Do not override managed launcher arg via trailing CLI: $arg" >&2
             echo "        Use environment variables in this launcher instead." >&2
             exit 1

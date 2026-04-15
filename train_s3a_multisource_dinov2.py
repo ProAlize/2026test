@@ -1701,6 +1701,7 @@ def _validate_resume_contract(
         "s3a_allow_unsafe_zero_source0_floor",
         "s3a_router_policy_kl_lambda",
         "dinov2_model_variant",
+        "s3a_adapter_hidden_dim",
     }
     backward_compatible_missing_defaults = {
         # For boolean contract flags, require legacy-equivalent default.
@@ -1709,6 +1710,8 @@ def _validate_resume_contract(
         "s3a_router_policy_kl_lambda": 0.0,
         # Legacy checkpoints always used vitb14.
         "dinov2_model_variant": "vitb14",
+        # Legacy checkpoints stored None (fallback to in_dim); new default is 2048.
+        "s3a_adapter_hidden_dim": None,
     }
     mismatches = []
     missing_keys = []
@@ -2736,13 +2739,20 @@ def main(args):
                 )
                 alpha_dino_above_floor = max(0.0, avg_alpha_dino - source0_floor_active)
                 source0_excess_epsilon = 1e-3
+                # Per-layer DINO starvation: trigger if ANY layer is starved,
+                # not just the cross-layer average.
+                any_layer_dino_starved = any(
+                    max(0.0, lv - source0_floor_active) <= source0_excess_epsilon
+                    for lv in avg_alpha_dino_layers
+                ) if avg_alpha_dino_layers else False
                 dino_starved = (
                     1.0
                     if (
                         args.s3a_use_ema_source
                         and train_steps >= args.s3a_self_warmup_steps
                         and avg_alpha_self > args.s3a_collapse_self_threshold
-                        and alpha_dino_above_floor <= source0_excess_epsilon
+                        and (alpha_dino_above_floor <= source0_excess_epsilon
+                             or any_layer_dino_starved)
                     )
                     else 0.0
                 )
@@ -2769,7 +2779,8 @@ def main(args):
                         args.s3a_use_ema_source
                         and global_self_probe_count > 0
                         and train_steps >= args.s3a_self_warmup_steps
-                        and alpha_dino_above_floor <= source0_excess_epsilon
+                        and (alpha_dino_above_floor <= source0_excess_epsilon
+                             or any_layer_dino_starved)
                         and avg_alpha_self > args.s3a_collapse_self_threshold
                         and avg_utility_dino > args.s3a_collapse_utility_threshold
                         and avg_loss_fused_probe + args.s3a_collapse_margin < avg_loss_self_only
@@ -3214,7 +3225,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=2048,
         help=(
             "Hidden dimension for SpatiallyFaithfulAdapter. "
-            "Default 2048 matches REPA projector width."
+            "Default 2048 matches REPA projector width. "
+            "Pass 0 to use in_dim (legacy behaviour, needed for resuming old checkpoints)."
         ),
     )
     parser.add_argument("--s3a-router-hidden-dim", type=int, default=256)
@@ -3449,6 +3461,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args):
+    # Normalize: 0 → None for adapter hidden dim (0 means "use in_dim").
+    if args.s3a_adapter_hidden_dim is not None and args.s3a_adapter_hidden_dim <= 0:
+        args.s3a_adapter_hidden_dim = None
+
     if args.epochs <= 0:
         raise ValueError("--epochs must be > 0")
     if args.log_every <= 0:
