@@ -49,7 +49,7 @@ from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 
 CHECKPOINT_FORMAT_VERSION = 5
-METRICS_SCHEMA_VERSION = 2
+METRICS_SCHEMA_VERSION = 5
 
 
 #################################################################################
@@ -413,6 +413,68 @@ def spatial_loss_per_sample(pred: torch.Tensor, target: torch.Tensor) -> torch.T
     if p.shape[1] != z.shape[1]:
         z = F.interpolate(z.unsqueeze(1), size=p.shape[1], mode="linear", align_corners=False).squeeze(1)
     return (p - z).abs().mean(dim=1)
+
+
+def source0_min_alpha_at_step(step: int, args) -> float:
+    floor = 0.0
+    if (
+        args.s3a_dino_alpha_floor > 0
+        and args.s3a_dino_alpha_floor_steps > 0
+        and step < args.s3a_dino_alpha_floor_steps
+    ):
+        floor_ratio = 1.0 - (step / max(1, args.s3a_dino_alpha_floor_steps))
+        floor = max(floor, args.s3a_dino_alpha_floor * max(0.0, floor_ratio))
+    if args.s3a_protect_source0_min_alpha > 0:
+        floor = max(floor, args.s3a_protect_source0_min_alpha)
+    return float(floor)
+
+
+def router_policy_kl_and_gap_per_sample(
+    raw_alpha: torch.Tensor,
+    policy_alpha: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    raw_safe = raw_alpha.clamp(min=1e-8)
+    policy_safe = policy_alpha.clamp(min=1e-8)
+    # Keep router policy close to deployed alpha policy to avoid raw/effective drift.
+    kl = (raw_safe * (raw_safe.log() - policy_safe.log())).sum(dim=-1)
+    gap = (raw_alpha - policy_alpha).abs().sum(dim=-1)
+    return kl, gap
+
+
+def make_empty_align_stats(layer_indices: List[int]) -> Dict[str, Any]:
+    return {
+        "used_layers": 0.0,
+        "feat": 0.0,
+        "attn": 0.0,
+        "spatial": 0.0,
+        "alpha_dino": 0.0,
+        "alpha_self": 0.0,
+        "gate_self": 0.0,
+        "gate_self_state": 0.0,
+        "diff_w": 0.0,
+        "raw_alpha_dino": 0.0,
+        "raw_alpha_self": 0.0,
+        "router_entropy_norm": 0.0,
+        "router_policy_kl": 0.0,
+        "router_policy_gap": 0.0,
+        "loss_fused": 0.0,
+        "loss_fused_probe": 0.0,
+        "loss_dino_only": 0.0,
+        "loss_self_only": 0.0,
+        "utility_dino": 0.0,
+        "utility_self": 0.0,
+        "utility_self_ema": 0.0,
+        "utility_self_active_ema": 0.0,
+        "utility_self_inactive_ema": 0.0,
+        "utility_self_active_ema_count": 0.0,
+        "utility_self_inactive_ema_count": 0.0,
+        "probe_count": 0.0,
+        "self_probe_count": 0.0,
+        "collapse_alarm": 0.0,
+        "alpha_dino_min_layer": 0.0,
+        "alpha_dino_max_layer": 0.0,
+        "alpha_dino_layers": [0.0 for _ in layer_indices],
+    }
 
 
 #################################################################################
@@ -839,8 +901,24 @@ class S3AAlignmentHead(nn.Module):
     ) -> torch.Tensor:
         mask = source_ready.clone()
 
-        if self.use_ema_source and current_step < self_warmup_steps:
+        warmup_active = (
+            self.use_ema_source
+            and self.num_sources > 1
+            and current_step < self_warmup_steps
+        )
+        if warmup_active:
             mask[1] = 0.0
+            if enable_selective_gate:
+                # Warmup should not be a delayed auto-open path for source1:
+                # keep controller gate closed and clear runtime traces.
+                with torch.no_grad():
+                    self.source_gate_mask[layer_slot, 1] = 0.0
+                    self.source_inactive_steps[layer_slot, 1] = 0
+                    self.source_recover_steps[layer_slot, 1] = 0
+                    self.source_utility_active_ema[layer_slot, 1] = 0.0
+                    self.source_utility_inactive_ema[layer_slot, 1] = 0.0
+                    self.source_utility_active_initialized[layer_slot, 1] = False
+                    self.source_utility_inactive_initialized[layer_slot, 1] = False
         if (
             self.use_ema_source
             and self.num_sources > 1
@@ -942,9 +1020,12 @@ def compute_s3a_alignment_loss(
     alpha_dino_acc = 0.0
     alpha_self_acc = 0.0
     gate_self_acc = 0.0
+    gate_self_state_acc = 0.0
     raw_alpha_dino_acc = 0.0
     raw_alpha_self_acc = 0.0
     router_entropy_acc = 0.0
+    router_policy_kl_acc = 0.0
+    router_policy_gap_acc = 0.0
     loss_fused_acc = 0.0
     loss_fused_probe_acc = 0.0
     loss_dino_only_acc = 0.0
@@ -1065,17 +1146,7 @@ def compute_s3a_alignment_loss(
         def _compute_dino_floor(mask_vec: torch.Tensor) -> float:
             if not (s3a_head.num_sources > 1 and mask_vec[0] > 0):
                 return 0.0
-            dino_floor = 0.0
-            if (
-                args.s3a_dino_alpha_floor > 0
-                and args.s3a_dino_alpha_floor_steps > 0
-                and current_step < args.s3a_dino_alpha_floor_steps
-            ):
-                floor_ratio = 1.0 - (current_step / max(1, args.s3a_dino_alpha_floor_steps))
-                dino_floor = max(dino_floor, args.s3a_dino_alpha_floor * max(0.0, floor_ratio))
-            if args.s3a_protect_source0_min_alpha > 0:
-                dino_floor = max(dino_floor, args.s3a_protect_source0_min_alpha)
-            return dino_floor
+            return source0_min_alpha_at_step(current_step, args)
 
         def _build_alpha(
             mask_vec: torch.Tensor,
@@ -1098,6 +1169,17 @@ def compute_s3a_alignment_loss(
             return alpha_local
 
         alpha = _build_alpha(source_mask)
+        router_policy_kl_ps = torch.zeros(pred.shape[0], device=device)
+        router_policy_gap_ps = torch.zeros(pred.shape[0], device=device)
+        if (
+            s3a_head.num_sources > 1
+            and source_ready.sum().item() > 1
+            and args.s3a_router_policy_kl_lambda > 0
+        ):
+            router_policy_kl_ps, router_policy_gap_ps = router_policy_kl_and_gap_per_sample(
+                raw_alpha=raw_alpha,
+                policy_alpha=alpha.detach(),
+            )
 
         fused = torch.zeros_like(pred)
         for src_idx, src_tokens in enumerate(sources):
@@ -1264,7 +1346,11 @@ def compute_s3a_alignment_loss(
                 utility_probe_count += 1
 
         sample_weights = diff_weights * (phase_weight * layer_weights[slot])
-        layer_loss = (sample_weights * combined_ps).mean()
+        router_policy_kl_loss = (sample_weights * router_policy_kl_ps).mean()
+        layer_loss = (
+            (sample_weights * combined_ps).mean()
+            + args.s3a_router_policy_kl_lambda * router_policy_kl_loss
+        )
 
         total_loss = total_loss + layer_loss
         used_layers += 1
@@ -1282,8 +1368,12 @@ def compute_s3a_alignment_loss(
             ).sum(dim=-1)
             entropy = entropy / math.log(s3a_head.num_sources)
             router_entropy_acc += entropy.mean().item()
+            router_policy_kl_acc += router_policy_kl_ps.mean().item()
+            router_policy_gap_acc += router_policy_gap_ps.mean().item()
         else:
             router_entropy_acc += 0.0
+            router_policy_kl_acc += 0.0
+            router_policy_gap_acc += 0.0
         loss_fused_acc += combined_ps.mean().item()
         loss_fused_probe_acc += fused_probe_loss_mean
         loss_dino_only_acc += dino_layer_loss_mean
@@ -1292,6 +1382,10 @@ def compute_s3a_alignment_loss(
         if s3a_head.num_sources > 1:
             alpha_self_acc += alpha[:, 1].mean().item()
             gate_self_acc += source_mask[1].item()
+            if args.s3a_enable_selective_gate:
+                gate_self_state_acc += s3a_head.source_gate_mask[slot, 1].item()
+            else:
+                gate_self_state_acc += 1.0 if source_ready[1].item() > 0 else 0.0
             loss_self_only_acc += self_layer_loss_mean
             if do_probe:
                 if bool(s3a_head.source_utility_active_initialized[slot, 1].item()):
@@ -1362,37 +1456,7 @@ def compute_s3a_alignment_loss(
                 )
 
     if used_layers == 0:
-        stats = {
-            "used_layers": 0,
-            "feat": 0.0,
-            "attn": 0.0,
-            "spatial": 0.0,
-            "alpha_dino": 0.0,
-            "alpha_self": 0.0,
-            "gate_self": 0.0,
-            "diff_w": 0.0,
-            "raw_alpha_dino": 0.0,
-            "raw_alpha_self": 0.0,
-            "router_entropy_norm": 0.0,
-            "loss_fused": 0.0,
-            "loss_fused_probe": 0.0,
-            "loss_dino_only": 0.0,
-            "loss_self_only": 0.0,
-            "utility_dino": 0.0,
-            "utility_self": 0.0,
-            "utility_self_ema": 0.0,
-            "utility_self_active_ema": 0.0,
-            "utility_self_inactive_ema": 0.0,
-            "utility_self_active_ema_count": 0.0,
-            "utility_self_inactive_ema_count": 0.0,
-            "probe_count": 0.0,
-            "self_probe_count": 0.0,
-            "collapse_alarm": 0.0,
-            "alpha_dino_min_layer": 0.0,
-            "alpha_dino_max_layer": 0.0,
-            "alpha_dino_layers": [0.0 for _ in s3a_head.layer_indices],
-        }
-        return total_loss, stats
+        return total_loss, make_empty_align_stats(s3a_head.layer_indices)
 
     total_loss = total_loss / used_layers
 
@@ -1404,12 +1468,17 @@ def compute_s3a_alignment_loss(
         "alpha_dino": alpha_dino_acc / used_layers,
         "alpha_self": alpha_self_acc / used_layers if s3a_head.num_sources > 1 else 0.0,
         "gate_self": gate_self_acc / used_layers if s3a_head.num_sources > 1 else 0.0,
+        "gate_self_state": (
+            gate_self_state_acc / used_layers if s3a_head.num_sources > 1 else 0.0
+        ),
         "diff_w": diff_weights.mean().item(),
         "raw_alpha_dino": raw_alpha_dino_acc / used_layers,
         "raw_alpha_self": (
             raw_alpha_self_acc / used_layers if s3a_head.num_sources > 1 else 0.0
         ),
         "router_entropy_norm": router_entropy_acc / used_layers,
+        "router_policy_kl": router_policy_kl_acc / used_layers,
+        "router_policy_gap": router_policy_gap_acc / used_layers,
         "loss_fused": loss_fused_acc / used_layers,
         "loss_fused_probe": loss_fused_probe_acc / max(1, utility_probe_count),
         "loss_dino_only": loss_dino_only_acc / max(1, dino_only_count),
@@ -1542,6 +1611,7 @@ def _validate_resume_contract(
         "s3a_trainable_ema_adapters",
         "s3a_enable_selective_gate",
         "s3a_self_warmup_steps",
+        "s3a_allow_unsafe_zero_source0_floor",
         "s3a_dino_alpha_floor",
         "s3a_dino_alpha_floor_steps",
         "s3a_protect_source0_min_alpha",
@@ -1574,14 +1644,20 @@ def _validate_resume_contract(
         "s3a_adapter_hidden_dim",
         "s3a_router_hidden_dim",
         "s3a_router_detach_input",
+        "s3a_router_policy_kl_lambda",
         "s3a_attn_max_tokens",
         "s3a_max_grad_norm",
     ]
+    backward_compatible_missing_keys = {
+        # Added after legacy checkpoints; safe to backfill from current args.
+        "s3a_allow_unsafe_zero_source0_floor",
+        "s3a_router_policy_kl_lambda",
+    }
     backward_compatible_missing_defaults = {
-        # Added after legacy checkpoints; safe to backfill only when
-        # current run still uses legacy-equivalent defaults.
-        "s3a_protect_source0_min_alpha": 0.0,
-        "s3a_gate_reopen_probe_alpha_floor": 0.0,
+        # For boolean contract flags, require legacy-equivalent default.
+        "s3a_allow_unsafe_zero_source0_floor": False,
+        # Objective-changing router regularizer: old checkpoints were equivalent to 0.0.
+        "s3a_router_policy_kl_lambda": 0.0,
     }
     mismatches = []
     missing_keys = []
@@ -1589,10 +1665,14 @@ def _validate_resume_contract(
         if not hasattr(current_args, key):
             continue
         if key not in saved_args_dict:
-            if key in backward_compatible_missing_defaults:
-                legacy_default = backward_compatible_missing_defaults[key]
-                if _is_equal_resume_value(getattr(current_args, key), legacy_default):
+            if key in backward_compatible_missing_keys:
+                if key in backward_compatible_missing_defaults:
+                    legacy_default = backward_compatible_missing_defaults[key]
+                    if _is_equal_resume_value(getattr(current_args, key), legacy_default):
+                        continue
+                    missing_keys.append(key)
                     continue
+                continue
             missing_keys.append(key)
             continue
         current_val = getattr(current_args, key)
@@ -1603,8 +1683,9 @@ def _validate_resume_contract(
         raise ValueError(
             "Resume contract missing critical keys in checkpoint args: "
             f"{missing_keys[:8]}{' ...' if len(missing_keys) > 8 else ''}. "
-            "Missing keys are auto-backfilled only when current values match "
-            "legacy defaults. Use --allow-legacy-resume-args to bypass (unsafe)."
+            "Some late-added keys are auto-backfilled from current args, while "
+            "safety and objective-changing keys still require legacy-equivalent defaults. "
+            "Use --allow-legacy-resume-args to bypass (unsafe)."
         )
     if mismatches:
         utility_mode_mismatch = any(k == "s3a_utility_probe_mode" for (k, _, _) in mismatches)
@@ -1645,6 +1726,43 @@ def _reset_selective_gate_runtime_state(
     return applied
 
 
+def _sterilize_source0_gate_lane(
+    target_state: Dict[str, torch.Tensor],
+    expected_state: Dict[str, torch.Tensor],
+) -> List[str]:
+    lane0_keys = (
+        "source_gate_mask",
+        "source_inactive_steps",
+        "source_recover_steps",
+        "source_utility_active_ema",
+        "source_utility_inactive_ema",
+        "source_utility_active_initialized",
+        "source_utility_inactive_initialized",
+    )
+    applied: List[str] = []
+    for key in lane0_keys:
+        if key not in target_state or key not in expected_state:
+            continue
+        cur = target_state[key]
+        exp = expected_state[key]
+        if (
+            not isinstance(cur, torch.Tensor)
+            or not isinstance(exp, torch.Tensor)
+            or cur.ndim < 2
+            or exp.ndim < 2
+            or cur.shape[0] != exp.shape[0]
+            or cur.shape[1] == 0
+            or exp.shape[1] == 0
+        ):
+            continue
+        if key == "source_gate_mask":
+            target_state[key][:, 0] = 1.0
+        else:
+            target_state[key][:, 0] = exp[:, 0]
+        applied.append(key)
+    return applied
+
+
 def _migrate_legacy_s3a_state(
     loaded_state: Dict[str, torch.Tensor],
     expected_state: Dict[str, torch.Tensor],
@@ -1659,6 +1777,9 @@ def _migrate_legacy_s3a_state(
         reset_applied = _reset_selective_gate_runtime_state(migrated, expected_state)
         if reset_applied:
             migration_notes.append("reset_selective_gate_state_for_legacy_utility_semantics")
+    source0_sterilized = _sterilize_source0_gate_lane(migrated, expected_state)
+    if source0_sterilized:
+        migration_notes.append("sterilized_source0_gate_lane")
 
     missing = [k for k in expected_state.keys() if k not in migrated]
     unexpected = [k for k in migrated.keys() if k not in expected_state]
@@ -1784,6 +1905,9 @@ def load_checkpoint(
                 loaded_state=s3a_state,
                 expected_state=expected_state,
             )
+        source0_sterilized = _sterilize_source0_gate_lane(s3a_state, expected_state)
+        if source0_sterilized and "sterilized_source0_gate_lane" not in migration_notes:
+            migration_notes.append("sterilized_source0_gate_lane")
         s3a_head.module.load_state_dict(s3a_state, strict=True)
     else:
         migration_notes = []
@@ -2053,6 +2177,7 @@ def main(args):
             f"(train_steps={resumed_train_steps}, batches_seen={resumed_batches_seen}, "
             f"rng_restored={resumed_rng_states is not None}, "
             f"collapse_alarm_windows={int(resumed_s3a_runtime_state.get('collapse_alarm_windows', 0))}, "
+            f"dino_starved_windows={int(resumed_s3a_runtime_state.get('dino_starved_windows', 0))}, "
             f"collapse_mitigation_cooldown_windows={int(resumed_s3a_runtime_state.get('collapse_mitigation_cooldown_windows', 0))}, "
             f"collapse_mitigation_trigger_count={int(resumed_s3a_runtime_state.get('collapse_mitigation_trigger_count', 0))})"
         )
@@ -2084,9 +2209,12 @@ def main(args):
     running_alpha_dino = 0.0
     running_alpha_self = 0.0
     running_gate_self = 0.0
+    running_gate_self_state = 0.0
     running_raw_alpha_dino = 0.0
     running_raw_alpha_self = 0.0
     running_router_entropy = 0.0
+    running_router_policy_kl = 0.0
+    running_router_policy_gap = 0.0
     running_loss_fused = 0.0
     running_loss_fused_probe = 0.0
     running_loss_dino_only = 0.0
@@ -2104,6 +2232,7 @@ def main(args):
     running_alpha_dino_max_layer = 0.0
     running_alpha_dino_layers = [0.0 for _ in s3a_layer_indices]
     collapse_alarm_windows = int(resumed_s3a_runtime_state.get("collapse_alarm_windows", 0))
+    dino_starved_windows = int(resumed_s3a_runtime_state.get("dino_starved_windows", 0))
     collapse_mitigation_cooldown_windows = int(
         resumed_s3a_runtime_state.get("collapse_mitigation_cooldown_windows", 0)
     )
@@ -2168,6 +2297,8 @@ def main(args):
             f"  utility estimator  : {args.s3a_utility_probe_mode}\n"
             f"  off-probe alpha fl : {args.s3a_gate_reopen_probe_alpha_floor}\n"
             f"  source0 min alpha  : {args.s3a_protect_source0_min_alpha}\n"
+            f"  router KL lambda   : {args.s3a_router_policy_kl_lambda}\n"
+            f"  unsafe source0 min : {args.s3a_allow_unsafe_zero_source0_floor}\n"
             f"  loss weights       : feat={args.s3a_feat_weight}, "
             f"attn={args.s3a_attn_weight}, spatial={args.s3a_spatial_weight}"
         )
@@ -2189,6 +2320,45 @@ def main(args):
         }
         atomic_write_json(resolved_args_path, resolved_payload)
         logger.info(f"Resolved args saved at {resolved_args_path}")
+    if rank == 0 and metrics_jsonl_path is not None:
+        contract_row = {
+            "record_type": "contract",
+            "event_name": "s3a_contract",
+            "metrics_schema_version": METRICS_SCHEMA_VERSION,
+            "created_at": strftime("%Y-%m-%d %H:%M:%S"),
+            "step": int(train_steps),
+            "batches_seen": int(batches_seen),
+            "git_revision": git_revision,
+            "resume_from": args.resume,
+            "log_every": int(args.log_every),
+            "s3a": bool(args.s3a),
+            "s3a_use_ema_source": bool(args.s3a_use_ema_source),
+            "s3a_enable_selective_gate": bool(args.s3a_enable_selective_gate),
+            "s3a_self_warmup_steps": int(args.s3a_self_warmup_steps),
+            "s3a_dino_alpha_floor": float(args.s3a_dino_alpha_floor),
+            "s3a_dino_alpha_floor_steps": int(args.s3a_dino_alpha_floor_steps),
+            "s3a_protect_source0_min_alpha": float(args.s3a_protect_source0_min_alpha),
+            "s3a_source0_floor_step0": float(source0_min_alpha_at_step(0, args)),
+            "s3a_source0_floor_at_resume_step": float(source0_min_alpha_at_step(train_steps, args)),
+            "s3a_utility_probe_mode": args.s3a_utility_probe_mode,
+            "s3a_probe_every": int(args.s3a_probe_every),
+            "s3a_gate_reopen_probe_alpha_floor": float(args.s3a_gate_reopen_probe_alpha_floor),
+            "s3a_router_policy_kl_lambda": float(args.s3a_router_policy_kl_lambda),
+            "s3a_gate_utility_off_threshold": float(args.s3a_gate_utility_off_threshold),
+            "s3a_gate_utility_on_threshold": float(args.s3a_gate_utility_on_threshold),
+            "s3a_allow_unsafe_zero_warmup": bool(args.s3a_allow_unsafe_zero_warmup),
+            "s3a_allow_unsafe_zero_source0_floor": bool(
+                args.s3a_allow_unsafe_zero_source0_floor
+            ),
+            "s3a_collapse_alpha_threshold": float(args.s3a_collapse_alpha_threshold),
+            "s3a_collapse_self_threshold": float(args.s3a_collapse_self_threshold),
+            "s3a_collapse_margin": float(args.s3a_collapse_margin),
+            "s3a_collapse_auto_mitigate": bool(args.s3a_collapse_auto_mitigate),
+            "s3a_collapse_windows": int(args.s3a_collapse_windows),
+            "s3a_collapse_mitigate_windows": int(args.s3a_collapse_mitigate_windows),
+        }
+        with open(metrics_jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(contract_row, ensure_ascii=True) + "\n")
 
     done = False
     final_ckpt_saved = False
@@ -2270,36 +2440,7 @@ def main(args):
                 remove_hooks(ema_handles)
 
             loss_align = torch.tensor(0.0, device=device)
-            align_stats = {
-                "used_layers": 0.0,
-                "feat": 0.0,
-                "attn": 0.0,
-                "spatial": 0.0,
-                "alpha_dino": 0.0,
-                "alpha_self": 0.0,
-                "gate_self": 0.0,
-                "diff_w": 0.0,
-                "raw_alpha_dino": 0.0,
-                "raw_alpha_self": 0.0,
-                "router_entropy_norm": 0.0,
-                "loss_fused": 0.0,
-                "loss_fused_probe": 0.0,
-                "loss_dino_only": 0.0,
-                "loss_self_only": 0.0,
-                "utility_dino": 0.0,
-                "utility_self": 0.0,
-                "utility_self_ema": 0.0,
-                "utility_self_active_ema": 0.0,
-                "utility_self_inactive_ema": 0.0,
-                "utility_self_active_ema_count": 0.0,
-                "utility_self_inactive_ema_count": 0.0,
-                "probe_count": 0.0,
-                "self_probe_count": 0.0,
-                "collapse_alarm": 0.0,
-                "alpha_dino_min_layer": 0.0,
-                "alpha_dino_max_layer": 0.0,
-                "alpha_dino_layers": [0.0 for _ in s3a_layer_indices],
-            }
+            align_stats = make_empty_align_stats(s3a_layer_indices)
 
             if args.s3a and phase_weight > 0 and len(student_tokens) > 0:
                 x_dino = preprocess_for_dino(images)
@@ -2398,9 +2539,12 @@ def main(args):
             running_alpha_dino += align_stats["alpha_dino"]
             running_alpha_self += align_stats["alpha_self"]
             running_gate_self += align_stats["gate_self"]
+            running_gate_self_state += align_stats["gate_self_state"]
             running_raw_alpha_dino += align_stats["raw_alpha_dino"]
             running_raw_alpha_self += align_stats["raw_alpha_self"]
             running_router_entropy += align_stats["router_entropy_norm"]
+            running_router_policy_kl += align_stats["router_policy_kl"]
+            running_router_policy_gap += align_stats["router_policy_gap"]
             running_loss_fused += align_stats["loss_fused"]
             running_loss_fused_probe += align_stats["loss_fused_probe"] * align_stats["probe_count"]
             running_loss_dino_only += align_stats["loss_dino_only"] * align_stats["probe_count"]
@@ -2472,9 +2616,12 @@ def main(args):
                 avg_alpha_dino = _reduce_mean(running_alpha_dino)
                 avg_alpha_self = _reduce_mean(running_alpha_self)
                 avg_gate_self = _reduce_mean(running_gate_self)
+                avg_gate_self_state = _reduce_mean(running_gate_self_state)
                 avg_raw_alpha_dino = _reduce_mean(running_raw_alpha_dino)
                 avg_raw_alpha_self = _reduce_mean(running_raw_alpha_self)
                 avg_router_entropy = _reduce_mean(running_router_entropy)
+                avg_router_policy_kl = _reduce_mean(running_router_policy_kl)
+                avg_router_policy_gap = _reduce_mean(running_router_policy_gap)
                 avg_loss_fused = _reduce_mean(running_loss_fused)
                 avg_loss_fused_probe, _ = _reduce_probe_mean(
                     running_loss_fused_probe, running_probe_count
@@ -2510,6 +2657,39 @@ def main(args):
                     )
                     dist.all_reduce(layer_avg_tensor, op=dist.ReduceOp.SUM)
                     avg_alpha_dino_layers.append(layer_avg_tensor.item() / dist.get_world_size())
+                source0_floor_active = (
+                    source0_min_alpha_at_step(train_steps, args)
+                    if args.s3a_use_ema_source
+                    else 0.0
+                )
+                alpha_dino_above_floor = max(0.0, avg_alpha_dino - source0_floor_active)
+                source0_excess_epsilon = 1e-3
+                dino_starved = (
+                    1.0
+                    if (
+                        args.s3a_use_ema_source
+                        and train_steps >= args.s3a_self_warmup_steps
+                        and avg_alpha_self > args.s3a_collapse_self_threshold
+                        and alpha_dino_above_floor <= source0_excess_epsilon
+                    )
+                    else 0.0
+                )
+                dual_source_alive = (
+                    1.0
+                    if (
+                        args.s3a_use_ema_source
+                        and avg_alpha_self > 1e-3
+                        and alpha_dino_above_floor > 0.01
+                    )
+                    else 0.0
+                )
+                dual_synergy_margin = 0.0
+                dual_synergy_supported = 0.0
+                if global_probe_count > 0 and global_self_probe_count > 0:
+                    dual_synergy_margin = (
+                        min(avg_loss_dino_only, avg_loss_self_only) - avg_loss_fused_probe
+                    )
+                    dual_synergy_supported = 1.0 if dual_synergy_margin > 0 else 0.0
 
                 collapse_window_triggered = False
                 if global_probe_count > 0:
@@ -2517,7 +2697,7 @@ def main(args):
                         args.s3a_use_ema_source
                         and global_self_probe_count > 0
                         and train_steps >= args.s3a_self_warmup_steps
-                        and avg_alpha_dino <= args.s3a_collapse_alpha_threshold
+                        and alpha_dino_above_floor <= source0_excess_epsilon
                         and avg_alpha_self > args.s3a_collapse_self_threshold
                         and avg_utility_dino > args.s3a_collapse_utility_threshold
                         and avg_loss_fused_probe + args.s3a_collapse_margin < avg_loss_self_only
@@ -2525,10 +2705,17 @@ def main(args):
                     collapse_alarm_windows = (
                         collapse_alarm_windows + 1 if collapse_window_triggered else 0
                     )
+                    dino_starved_windows = (
+                        dino_starved_windows + 1 if dino_starved > 0 else 0
+                    )
                 else:
                     collapse_alarm_windows = 0
+                    dino_starved_windows = 0
                 collapse_alarm = (
                     1.0 if collapse_alarm_windows >= args.s3a_collapse_windows else 0.0
+                )
+                dino_starved_alarm = (
+                    1.0 if dino_starved_windows >= args.s3a_collapse_windows else 0.0
                 )
                 mitigation_active_windows = 0
                 if args.s3a and args.s3a_use_ema_source:
@@ -2541,7 +2728,7 @@ def main(args):
                     and args.s3a_use_ema_source
                     and args.s3a_enable_selective_gate
                     and args.s3a_collapse_auto_mitigate
-                    and collapse_alarm > 0
+                    and (collapse_alarm > 0 or dino_starved_alarm > 0)
                     and mitigation_active_windows <= 0
                     and collapse_mitigation_cooldown_windows <= 0
                 ):
@@ -2574,6 +2761,7 @@ def main(args):
                         f"probes={int(global_probe_count)}, "
                         f"self_probes={int(global_self_probe_count)}, "
                         f"windows={collapse_alarm_windows}, "
+                        f"dino_starved_windows={dino_starved_windows}, "
                         f"mitigation_active={mitigation_active_windows}, "
                         f"mitigation_cooldown={collapse_mitigation_cooldown_windows}, "
                         f"mitigation_triggered={int(mitigation_triggered)}"
@@ -2590,11 +2778,15 @@ def main(args):
                     f"Attn={avg_attn:.4f}  "
                     f"Spatial={avg_spatial:.4f}  "
                     f"a_dino={avg_alpha_dino:.3f}  "
+                    f"a_dino_above_floor={alpha_dino_above_floor:.3f}  "
                     f"a_self={avg_alpha_self:.3f}  "
                     f"raw_dino={avg_raw_alpha_dino:.3f}  "
                     f"raw_self={avg_raw_alpha_self:.3f}  "
                     f"H={avg_router_entropy:.3f}  "
-                    f"gate_self={avg_gate_self:.3f}  "
+                    f"rKL={avg_router_policy_kl:.4f}  "
+                    f"rGap={avg_router_policy_gap:.3f}  "
+                    f"mask_self={avg_gate_self:.3f}  "
+                    f"gate_self_state={avg_gate_self_state:.3f}  "
                     f"Lfused={avg_loss_fused:.4f}  "
                     f"LfusedProbe={avg_loss_fused_probe:.4f}  "
                     f"Ldino={avg_loss_dino_only:.4f}  "
@@ -2606,6 +2798,12 @@ def main(args):
                     f"UselfEMA_off={avg_utility_self_inactive_ema:.4f}  "
                     f"ProbeN={int(global_probe_count)}  "
                     f"SelfProbeN={int(global_self_probe_count)}  "
+                    f"dino_starved={int(dino_starved)}  "
+                    f"dino_starved_alarm={int(dino_starved_alarm)}  "
+                    f"dino_starved_windows={int(dino_starved_windows)}  "
+                    f"dual_alive={int(dual_source_alive)}  "
+                    f"synergy_margin={dual_synergy_margin:.4f}  "
+                    f"synergy={int(dual_synergy_supported)}  "
                     f"alarm={collapse_alarm:.0f}  "
                     f"mitigate={mitigation_triggered:.0f}  "
                     f"mitigateW={mitigation_active_windows}  "
@@ -2632,12 +2830,23 @@ def main(args):
                         "attn": float(avg_attn),
                         "spatial": float(avg_spatial),
                         "alpha_dino": float(avg_alpha_dino),
+                        "source0_floor_active": float(source0_floor_active),
+                        "alpha_dino_above_floor": float(alpha_dino_above_floor),
+                        "dino_starved": float(dino_starved),
+                        "dino_starved_alarm": float(dino_starved_alarm),
+                        "dino_starved_windows": int(dino_starved_windows),
+                        "dual_source_alive": float(dual_source_alive),
+                        "dual_synergy_margin": float(dual_synergy_margin),
+                        "dual_synergy_supported": float(dual_synergy_supported),
                         "alpha_self": float(avg_alpha_self),
                         "raw_alpha_dino": float(avg_raw_alpha_dino),
                         "raw_alpha_self": float(avg_raw_alpha_self),
                         "router_entropy_norm": float(avg_router_entropy),
+                        "router_policy_kl": float(avg_router_policy_kl),
+                        "router_policy_gap": float(avg_router_policy_gap),
                         "gate_self": float(avg_gate_self),
                         "self_source_mask_mean": float(avg_gate_self),
+                        "self_gate_state_mean": float(avg_gate_self_state),
                         "loss_fused": float(avg_loss_fused),
                         "loss_fused_probe": float(avg_loss_fused_probe),
                         "loss_dino_only": float(avg_loss_dino_only),
@@ -2690,9 +2899,12 @@ def main(args):
                 running_alpha_dino = 0.0
                 running_alpha_self = 0.0
                 running_gate_self = 0.0
+                running_gate_self_state = 0.0
                 running_raw_alpha_dino = 0.0
                 running_raw_alpha_self = 0.0
                 running_router_entropy = 0.0
+                running_router_policy_kl = 0.0
+                running_router_policy_gap = 0.0
                 running_loss_fused = 0.0
                 running_loss_fused_probe = 0.0
                 running_loss_dino_only = 0.0
@@ -2728,6 +2940,7 @@ def main(args):
                         rng_states=rng_states,
                         s3a_runtime_state={
                             "collapse_alarm_windows": int(collapse_alarm_windows),
+                            "dino_starved_windows": int(dino_starved_windows),
                             "collapse_mitigation_cooldown_windows": int(
                                 collapse_mitigation_cooldown_windows
                             ),
@@ -2757,6 +2970,7 @@ def main(args):
                         rng_states=rng_states,
                         s3a_runtime_state={
                             "collapse_alarm_windows": int(collapse_alarm_windows),
+                            "dino_starved_windows": int(dino_starved_windows),
                             "collapse_mitigation_cooldown_windows": int(
                                 collapse_mitigation_cooldown_windows
                             ),
@@ -2789,6 +3003,7 @@ def main(args):
             rng_states=rng_states,
             s3a_runtime_state={
                 "collapse_alarm_windows": int(collapse_alarm_windows),
+                "dino_starved_windows": int(dino_starved_windows),
                 "collapse_mitigation_cooldown_windows": int(
                     collapse_mitigation_cooldown_windows
                 ),
@@ -2995,7 +3210,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s3a-gate-utility-off-threshold",
         type=float,
-        default=0.0,
+        default=0.002,
         help="Utility EMA below this threshold counts as bad for gate-off accounting.",
     )
     parser.add_argument(
@@ -3020,6 +3235,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--s3a-allow-unsafe-zero-source0-floor",
+        action="store_true",
+        help=(
+            "Allow dual-source training with --s3a-protect-source0-min-alpha <= 0. "
+            "Unsafe for collaboration objective and blocked by default."
+        ),
+    )
+    parser.add_argument(
         "--s3a-dino-alpha-floor",
         type=float,
         default=0.1,
@@ -3041,10 +3264,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--s3a-router-policy-kl-lambda",
+        type=float,
+        default=0.1,
+        help=(
+            "Weight for KL(raw_router_alpha || deployed_alpha_policy). "
+            "Keeps router policy aligned with floor/gate-corrected policy to avoid raw collapse."
+        ),
+    )
+    parser.add_argument(
         "--s3a-collapse-alpha-threshold",
         type=float,
         default=0.05,
-        help="Collapse alarm threshold for alpha_dino.",
+        help=(
+            "Diagnostic threshold for absolute alpha_dino collapse score. "
+            "Operational mitigation uses floor-relative alpha_dino_above_floor."
+        ),
     )
     parser.add_argument(
         "--s3a-collapse-self-threshold",
@@ -3174,6 +3409,18 @@ def validate_args(args):
             raise ValueError("--s3a-dino-alpha-floor-steps must be >= 0")
         if not (0.0 <= args.s3a_protect_source0_min_alpha < 1.0):
             raise ValueError("--s3a-protect-source0-min-alpha must be in [0, 1)")
+        if args.s3a_router_policy_kl_lambda < 0:
+            raise ValueError("--s3a-router-policy-kl-lambda must be >= 0")
+        if (
+            args.s3a_use_ema_source
+            and args.s3a_protect_source0_min_alpha <= 0
+            and not args.s3a_allow_unsafe_zero_source0_floor
+        ):
+            raise ValueError(
+                "Unsafe S3A config rejected: dual-source collaboration contract requires "
+                "--s3a-protect-source0-min-alpha > 0. "
+                "Override explicitly with --s3a-allow-unsafe-zero-source0-floor."
+            )
         if args.s3a_collapse_windows <= 0:
             raise ValueError("--s3a-collapse-windows must be > 0")
         if args.s3a_collapse_mitigate_windows <= 0:
@@ -3220,17 +3467,6 @@ def validate_args(args):
                 "max(--s3a-dino-alpha-floor, --s3a-protect-source0-min-alpha) + "
                 "--s3a-gate-reopen-probe-alpha-floor must be <= 1.0"
             )
-        if (
-            args.s3a_use_ema_source
-            and args.s3a_enable_selective_gate
-            and args.s3a_collapse_alpha_threshold < args.s3a_protect_source0_min_alpha
-        ):
-            raise ValueError(
-                "Unreachable collapse alarm config: "
-                "--s3a-collapse-alpha-threshold must be >= --s3a-protect-source0-min-alpha."
-            )
-
-
 def cli_main():
     parser = build_parser()
     args = parser.parse_args()

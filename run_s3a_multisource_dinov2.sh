@@ -40,6 +40,9 @@ S3A_SELF_WARMUP_STEPS="${S3A_SELF_WARMUP_STEPS:-5000}"
 S3A_DINO_ALPHA_FLOOR="${S3A_DINO_ALPHA_FLOOR:-0.1}"
 S3A_DINO_ALPHA_FLOOR_STEPS="${S3A_DINO_ALPHA_FLOOR_STEPS:-8000}"
 S3A_PROTECT_SOURCE0_MIN_ALPHA="${S3A_PROTECT_SOURCE0_MIN_ALPHA:-0.05}"
+S3A_ROUTER_POLICY_KL_LAMBDA="${S3A_ROUTER_POLICY_KL_LAMBDA:-0.1}"
+S3A_ALLOW_UNSAFE_ZERO_SOURCE0_FLOOR="${S3A_ALLOW_UNSAFE_ZERO_SOURCE0_FLOOR:-0}"
+S3A_ALLOW_UNSAFE_ZERO_WARMUP="${S3A_ALLOW_UNSAFE_ZERO_WARMUP:-0}"
 S3A_PROBE_EVERY="${S3A_PROBE_EVERY:-10}"
 S3A_UTILITY_PROBE_MODE="${S3A_UTILITY_PROBE_MODE:-policy_loo}"
 S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR="${S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR:-0.05}"
@@ -144,6 +147,9 @@ echo "Train schedule   : $S3A_TRAIN_SCHEDULE (steps=$S3A_SCHEDULE_STEPS)"
 echo "Diff schedule    : $S3A_DIFF_SCHEDULE"
 echo "DINO alpha floor : $S3A_DINO_ALPHA_FLOOR (steps=$S3A_DINO_ALPHA_FLOOR_STEPS)"
 echo "DINO alpha min   : $S3A_PROTECT_SOURCE0_MIN_ALPHA"
+echo "Router KL lambda : $S3A_ROUTER_POLICY_KL_LAMBDA"
+echo "Unsafe min alpha0: $S3A_ALLOW_UNSAFE_ZERO_SOURCE0_FLOOR"
+echo "Unsafe zero warmup: $S3A_ALLOW_UNSAFE_ZERO_WARMUP"
 echo "Probe every      : $S3A_PROBE_EVERY"
 echo "Utility estimator: $S3A_UTILITY_PROBE_MODE"
 echo "Reopen probe αfl : $S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR"
@@ -173,6 +179,12 @@ if [[ "$ALLOW_MISSING_MANIFEST" == "1" ]]; then
 fi
 if [[ "$ALLOW_LEGACY_RESUME_ARGS" == "1" ]]; then
     OPTIONAL_ARGS+=(--allow-legacy-resume-args)
+fi
+if [[ "$S3A_ALLOW_UNSAFE_ZERO_SOURCE0_FLOOR" == "1" ]]; then
+    OPTIONAL_ARGS+=(--s3a-allow-unsafe-zero-source0-floor)
+fi
+if [[ "$S3A_ALLOW_UNSAFE_ZERO_WARMUP" == "1" ]]; then
+    OPTIONAL_ARGS+=(--s3a-allow-unsafe-zero-warmup)
 fi
 if [[ "$S3A_TRAINABLE_EMA_ADAPTERS" == "1" ]]; then
     OPTIONAL_ARGS+=(--s3a-trainable-ema-adapters)
@@ -227,6 +239,7 @@ env CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         --s3a-dino-alpha-floor "$S3A_DINO_ALPHA_FLOOR" \
         --s3a-dino-alpha-floor-steps "$S3A_DINO_ALPHA_FLOOR_STEPS" \
         --s3a-protect-source0-min-alpha "$S3A_PROTECT_SOURCE0_MIN_ALPHA" \
+        --s3a-router-policy-kl-lambda "$S3A_ROUTER_POLICY_KL_LAMBDA" \
         --s3a-probe-every "$S3A_PROBE_EVERY" \
         --s3a-utility-probe-mode "$S3A_UTILITY_PROBE_MODE" \
         --s3a-gate-reopen-probe-alpha-floor "$S3A_GATE_REOPEN_PROBE_ALPHA_FLOOR" \
