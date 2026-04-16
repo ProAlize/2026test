@@ -1061,17 +1061,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repa-train-schedule", type=str,
         choices=["constant", "linear_decay", "cosine_decay", "cutoff", "three_phase"],
-        default="cosine_decay",
-    )
-    parser.add_argument(
-        "--repa-warmup-steps", type=int, default=0,
+        default="three_phase",
         help=(
-            "three_phase 模式下的 warmup 步数。\n"
-            "例如 --repa-warmup-steps 100000 --repa-schedule-steps 400000\n"
-            "表示 0-100k 全力对齐，100k-400k 线性衰减，400k+ 权重为 0。"
+            "轴1 训练步数权重调度。默认 three_phase:\n"
+            "  [0, warmup_steps) = 1.0\n"
+            "  [warmup_steps, warmup_steps+schedule_steps) = 线性衰减\n"
+            "  [warmup_steps+schedule_steps, ∞) = 0.0"
         ),
     )
-    parser.add_argument("--repa-schedule-steps", type=int, default=40_000)
+    parser.add_argument(
+        "--repa-warmup-steps", type=int, default=100_000,
+        help=(
+            "three_phase: 前 N 步保持满权重（默认 100k）。\n"
+            "0~100k 全力对齐，100k 开始衰减。"
+        ),
+    )
+    parser.add_argument(
+        "--repa-schedule-steps", type=int, default=300_000,
+        help=(
+            "three_phase: 衰减截止步数（绝对值）。默认 300k。\n"
+            "衰减区间 = [warmup_steps, schedule_steps) = [100k, 300k)，\n"
+            "300k 后权重归零，纯生成训练。"
+        ),
+    )
     parser.add_argument(
         "--repa-diff-schedule", type=str,
         choices=["cosine", "linear_high", "linear_low", "uniform"],
