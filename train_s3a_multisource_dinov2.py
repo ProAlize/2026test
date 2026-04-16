@@ -399,8 +399,8 @@ def spatial_loss_per_sample(pred: torch.Tensor, target: torch.Tensor) -> torch.T
     spatial *structure* rather than absolute scale differences between the
     student adapter output and the teacher features.
     """
-    pred_energy = pred.norm(dim=-1)
-    target_energy = target.norm(dim=-1)
+    pred_energy = pred.norm(dim=-1).clamp(min=1e-6)
+    target_energy = target.norm(dim=-1).clamp(min=1e-6)
 
     # Mean-normalize energy maps to remove scale mismatch.
     pred_energy = pred_energy / pred_energy.mean(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -1178,7 +1178,13 @@ def compute_s3a_alignment_loss(
 
             floor_batch = floor.unsqueeze(0).expand(alpha_local.shape[0], -1)
             remain = 1.0 - floor_sum
-            residual = (alpha_local - floor_batch).clamp(min=0.0)
+            residual = alpha_local - floor_batch
+            # Straight-through estimator: forward uses clamped residual,
+            # backward passes gradient through as if unclamped.  This
+            # prevents zero-gradient when raw_alpha < floor, allowing the
+            # router to recover from below-floor states.
+            residual_clamped = residual.clamp(min=0.0)
+            residual = residual + (residual_clamped - residual).detach()
             residual_sum = residual.sum(dim=-1, keepdim=True)
             fallback = alpha_local / alpha_local.sum(dim=-1, keepdim=True).clamp(min=1e-8)
             residual_norm = torch.where(
