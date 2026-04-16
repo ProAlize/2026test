@@ -196,21 +196,27 @@ def get_train_phase_weight(
 ) -> float:
     """Phase-axis weight used in 3D curriculum.
 
-    For ``piecewise_linear``:
-        [0, warmup_steps)       → 1.0  (constant full strength)
-        [warmup_steps, schedule_steps) → linear 1.0 → 0.0
+    For ``piecewise_cosine`` (default):
+        [0, warmup_steps)       → 1.0     (constant full strength)
+        [warmup_steps, schedule_steps) → cosine 1.0 → 0.0  (smooth decay)
         [schedule_steps, ...)   → 0.0
+
+    For ``piecewise_linear``:
+        Same structure but with linear decay in the middle phase.
     """
     if schedule == "constant":
         return 1.0
 
-    if schedule == "piecewise_linear":
+    if schedule in ("piecewise_cosine", "piecewise_linear"):
         if current_step < warmup_steps:
             return 1.0
         if current_step >= schedule_steps:
             return 0.0
         decay_len = max(1, schedule_steps - warmup_steps)
-        return 1.0 - (current_step - warmup_steps) / decay_len
+        decay_progress = (current_step - warmup_steps) / decay_len
+        if schedule == "piecewise_cosine":
+            return 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+        return 1.0 - decay_progress  # piecewise_linear
 
     progress = min(max(current_step / max(1, schedule_steps), 0.0), 1.0)
 
@@ -223,7 +229,7 @@ def get_train_phase_weight(
 
     raise ValueError(
         f"Unknown train schedule: {schedule!r}. "
-        "Choose from: constant, linear_decay, cosine_decay, cutoff, piecewise_linear."
+        "Choose from: constant, linear_decay, cosine_decay, cutoff, piecewise_linear, piecewise_cosine."
     )
 
 
@@ -3268,8 +3274,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s3a-train-schedule",
         type=str,
-        choices=["constant", "linear_decay", "cosine_decay", "cutoff", "piecewise_linear"],
-        default="piecewise_linear",
+        choices=["constant", "linear_decay", "cosine_decay", "cutoff", "piecewise_linear", "piecewise_cosine"],
+        default="piecewise_cosine",
     )
     parser.add_argument("--s3a-schedule-steps", type=int, default=300_000)
     parser.add_argument(
@@ -3548,12 +3554,12 @@ def validate_args(args):
         if args.s3a_schedule_warmup_steps < 0:
             raise ValueError("--s3a-schedule-warmup-steps must be >= 0")
         if (
-            args.s3a_train_schedule == "piecewise_linear"
+            args.s3a_train_schedule in ("piecewise_linear", "piecewise_cosine")
             and args.s3a_schedule_warmup_steps >= args.s3a_schedule_steps
         ):
             raise ValueError(
                 "--s3a-schedule-warmup-steps must be < --s3a-schedule-steps "
-                "when using piecewise_linear schedule."
+                "when using piecewise_linear or piecewise_cosine schedule."
             )
         if args.s3a_feat_weight < 0 or args.s3a_attn_weight < 0 or args.s3a_spatial_weight < 0:
             raise ValueError("S3A loss weights must be >= 0")
