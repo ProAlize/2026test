@@ -536,8 +536,8 @@ def main(args):
         dino_model.eval()
         requires_grad(dino_model, False)
 
-        sit_hidden_dim = model.hidden_size
-        sit_depth      = model.depth
+        sit_hidden_dim = model.pos_embed.shape[-1]   # REPA SiT 没有 self.hidden_size
+        sit_depth      = len(model.blocks)
 
         # 探测 DINO 输出维度
         with torch.inference_mode():
