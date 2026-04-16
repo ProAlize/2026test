@@ -2191,7 +2191,16 @@ def main(args):
 
     model = DDP(model, device_ids=[device])
     if args.s3a:
-        s3a_head = DDP(s3a_head, device_ids=[device], broadcast_buffers=True)
+        # find_unused_parameters=True is needed because the router parameters
+        # are detached during self_warmup (no gradient path), and ema_adapters
+        # are always frozen.  Without this flag DDP raises an error about
+        # parameters not participating in the backward pass.
+        s3a_head = DDP(
+            s3a_head,
+            device_ids=[device],
+            broadcast_buffers=True,
+            find_unused_parameters=True,
+        )
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     s3a_trainable_param_count = 0
