@@ -1041,7 +1041,7 @@ if __name__ == "__main__":
     )
 
     # ── REPA 参数 ──────────────────────────────────────────────────────
-    parser.add_argument("--repa", action="store_true")
+    # --repa 默认启用，本脚本必须使用 REPA 对齐
     parser.add_argument(
         "--projector-type", type=str,
         choices=["repa", "irepa"], default="repa",
@@ -1092,20 +1092,22 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # 本脚本强制启用 REPA 对齐
+    args.repa = True
+
     # ── 路径校验 ───────────────────────────────────────────────────────
     if args.vae_model_dir is not None:
         if not os.path.isdir(args.vae_model_dir):
             raise FileNotFoundError(
                 f"--vae-model-dir not found: {args.vae_model_dir}"
             )
-    if args.repa:
-        if not os.path.isdir(args.dinov2_repo_dir):
-            raise FileNotFoundError(
-                f"--dinov2-repo-dir not found: {args.dinov2_repo_dir}"
-            )
-        if not os.path.isfile(args.dinov2_weight_path):
-            raise FileNotFoundError(
-                f"--dinov2-weight-path not found: {args.dinov2_weight_path}"
-            )
+    if not os.path.isdir(args.dinov2_repo_dir):
+        raise FileNotFoundError(
+            f"--dinov2-repo-dir not found: {args.dinov2_repo_dir}"
+        )
+    if not os.path.isfile(args.dinov2_weight_path):
+        raise FileNotFoundError(
+            f"--dinov2-weight-path not found: {args.dinov2_weight_path}"
+        )
 
     main(args)
