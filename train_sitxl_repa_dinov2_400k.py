@@ -773,15 +773,13 @@ def main(args):
                 # ── 获取 projected tokens ──────────────────────────────
                 if args.projector_type == "repa":
                     # REPA baseline: 使用模型内置 projector 的输出 zs_tilde
-                    # 与 REPA loss.py SILoss 严格一致的 proj_loss 计算
-                    proj_loss = 0.0
-                    bsz = dino_tokens.shape[0]
-                    for i, (z, z_tilde) in enumerate(zip([dino_tokens], zs_tilde)):
-                        for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
-                            z_tilde_j = F.normalize(z_tilde_j, dim=-1)
-                            z_j       = F.normalize(z_j, dim=-1)
-                            proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
-                    proj_loss = proj_loss / (len(zs_tilde) * bsz)
+                    # 与 REPA loss.py SILoss 数学等价的 batch 级实现
+                    # zs_tilde = [tensor [B, N, z_dim]]（单 encoder 只有 1 个元素）
+                    z_tilde = zs_tilde[0]                          # [B, N, z_dim]
+                    z_tilde_n = F.normalize(z_tilde, dim=-1)       # [B, N, z_dim]
+                    z_n       = F.normalize(dino_tokens, dim=-1)   # [B, N, D]
+                    # 逐 token cos，在 N 维取均值 → [B]
+                    proj_loss = -(z_n * z_tilde_n).sum(dim=-1).mean(dim=-1)  # [B]
 
                     # 轴 2：扩散时间步加权（REPA baseline 用 uniform 时等价于无加权）
                     weights = get_diff_timestep_weight(t_continuous, args.repa_diff_schedule)
@@ -855,12 +853,17 @@ def main(args):
                     logger.info(
                         f"  [step=1] dino_tokens : {dino_tokens.shape}"
                     )
-                    logger.info(
-                        f"  [step=1] sit_tokens  : {sit_tokens.shape}"
-                    )
-                    logger.info(
-                        f"  [step=1] proj_tokens : {proj_tokens.shape}"
-                    )
+                    if args.projector_type == "irepa" and 'tokens' in _captured_tokens:
+                        logger.info(
+                            f"  [step=1] sit_tokens  : {_captured_tokens['tokens'].shape}"
+                        )
+                        logger.info(
+                            f"  [step=1] proj_tokens : {proj_tokens.shape}"
+                        )
+                    elif args.projector_type == "repa":
+                        logger.info(
+                            f"  [step=1] zs_tilde[0] : {zs_tilde[0].shape}"
+                        )
                 logger.info(
                     f"  [step=1] train_align_weight : {train_align_weight:.4f}"
                 )
