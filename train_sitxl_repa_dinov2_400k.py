@@ -225,7 +225,7 @@ def cosine_align_loss_weighted(
 
     cos_per_token   = (pred_n * target_n).sum(dim=-1)    # [B, N]
     cos_per_sample  = cos_per_token.mean(dim=1)           # [B]
-    loss_per_sample = 1.0 - cos_per_sample                # [B]
+    loss_per_sample = -cos_per_sample                     # [B]  与 REPA SILoss 一致
 
     weights = get_diff_timestep_weight(t, diff_schedule)   # [B]
     loss    = (weights * loss_per_sample).mean()            # scalar
@@ -784,12 +784,6 @@ def main(args):
                     proj_loss = proj_loss / (len(zs_tilde) * bsz)
 
                     # 轴 2：扩散时间步加权（REPA baseline 用 uniform 时等价于无加权）
-                    weights = get_diff_timestep_weight(t_continuous, args.repa_diff_schedule)
-                    loss_align = (weights * proj_loss).mean()
-                    with torch.no_grad():
-                        avg_diff_weight = weights.mean().item()
-
-                    # 轴 2：扩散时间步加权
                     weights = get_diff_timestep_weight(t_continuous, args.repa_diff_schedule)
                     loss_align = (weights * proj_loss).mean()
                     with torch.no_grad():
