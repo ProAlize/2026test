@@ -1185,11 +1185,13 @@ def compute_s3a_alignment_loss(
             # router to recover from below-floor states.
             residual_clamped = residual.clamp(min=0.0)
             residual = residual + (residual_clamped - residual).detach()
-            residual_sum = residual.sum(dim=-1, keepdim=True)
+            # Use the forward-clamped sum for the branch condition to avoid
+            # STE-induced negative sums triggering the fallback incorrectly.
+            residual_sum_fwd = residual_clamped.sum(dim=-1, keepdim=True)
             fallback = alpha_local / alpha_local.sum(dim=-1, keepdim=True).clamp(min=1e-8)
             residual_norm = torch.where(
-                residual_sum > 0,
-                residual / residual_sum.clamp(min=1e-8),
+                residual_sum_fwd > 1e-9,
+                residual / residual_sum_fwd.clamp(min=1e-8),
                 fallback,
             )
             out = floor_batch + residual_norm * remain
