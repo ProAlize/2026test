@@ -1162,6 +1162,15 @@ def compute_s3a_alignment_loss(
             timestep_norm=t_norm,
             phase_norm=phase_norm_tensor,
         )
+        # During self_warmup (source[1] masked), detach router output so it
+        # does NOT learn a DINO-only prior that causes softmax saturation.
+        # After warmup the router starts from a near-uniform state.
+        if (
+            s3a_head.use_ema_source
+            and s3a_head.num_sources > 1
+            and current_step < args.s3a_self_warmup_steps
+        ):
+            raw_alpha = raw_alpha.detach()
 
         source_mask = s3a_head.get_source_mask(
             layer_slot=slot,
@@ -2293,6 +2302,9 @@ def main(args):
         s3a_head.train()
         dino_model.eval()
 
+    # Track whether the router output layer has been reset after self warmup.
+    _router_warmup_reset_done = (resumed_train_steps >= args.s3a_self_warmup_steps)
+
     train_steps = resumed_train_steps
     batches_seen = resumed_batches_seen
     log_steps = 0
@@ -2500,6 +2512,26 @@ def main(args):
                     schedule=args.s3a_train_schedule,
                     warmup_steps=args.s3a_schedule_warmup_steps,
                 )
+
+                # One-time router reset when self_warmup ends: zero the output
+                # layer so softmax returns to uniform [0.5, 0.5] instead of
+                # staying saturated at [~1, ~0] from the DINO-only warmup period.
+                if (
+                    args.s3a_use_ema_source
+                    and not _router_warmup_reset_done
+                    and current_step >= args.s3a_self_warmup_steps
+                ):
+                    _router_warmup_reset_done = True
+                    with torch.no_grad():
+                        # head[-1] is the final Linear(hidden, num_sources)
+                        router_mod = s3a_head.module.router
+                        router_mod.head[-1].weight.zero_()
+                        router_mod.head[-1].bias.zero_()
+                    if rank == 0:
+                        logger.info(
+                            f"  [step={current_step}] Router output layer reset "
+                            "to zero (post-warmup uniform initialization)."
+                        )
 
             student_tokens: Dict[str, torch.Tensor] = {}
             ema_tokens: Dict[str, torch.Tensor] = {}
