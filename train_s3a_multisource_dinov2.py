@@ -3403,7 +3403,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.9,
         help="EMA momentum for utility-driven gate updates.",
     )
-    parser.add_argument("--s3a-self-warmup-steps", type=int, default=5000)
+    parser.add_argument("--s3a-self-warmup-steps", type=int, default=25000)
     parser.add_argument(
         "--s3a-allow-unsafe-zero-warmup",
         action="store_true",
@@ -3429,8 +3429,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s3a-dino-alpha-floor-steps",
         type=int,
-        default=8000,
-        help="Number of steps to apply DINO alpha floor with linear decay to 0.",
+        default=25000,
+        help="Number of steps to apply DINO alpha floor with linear decay to persistent min.",
     )
     parser.add_argument(
         "--s3a-protect-source0-min-alpha",
