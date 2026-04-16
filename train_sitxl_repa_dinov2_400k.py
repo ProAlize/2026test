@@ -39,10 +39,11 @@ from torch.amp import autocast, GradScaler
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
 
-# ── SiT 模型导入 ──────────────────────────────────────────────────────────
-# 使用原版 SiT (willisma/SiT) 的模型定义
-# 请确保 SiT repo 的 models.py 在 Python 路径中
-from models import SiT_models
+# ── REPA 版 SiT 模型导入 ────────────────────────────────────────────────────────
+# 使用 REPA 修改版 SiT (sihyun-yu/REPA/models/sit.py)
+# 该版本包含内置 projectors、encoder_depth、use_cfg 等
+# forward 返回 (output, zs_tilde) tuple
+from models.sit import SiT_models
 from diffusers.models import AutoencoderKL
 
 
@@ -510,6 +511,7 @@ def main(args):
             f"(decay over {args.repa_schedule_steps} steps)\n"
             f"  diff_schedule  : {args.repa_diff_schedule}\n"
             f"  repa_lambda    : {args.repa_lambda}\n"
+            f"  projector_type : {args.projector_type}\n"
             f"  DINOv2 repo    : {args.dinov2_repo_dir}\n"
             f"  DINOv2 weight  : {args.dinov2_weight_path}"
         )
@@ -524,14 +526,6 @@ def main(args):
         sit_hidden_dim = model.hidden_size
         sit_depth      = model.depth
 
-        # hook 注入的 SiT block 索引
-        # REPA 默认使用浅层（encoder_depth=8），此处对应前 N 层之一
-        hook_layer_idx = (
-            args.repa_encoder_depth - 1
-            if args.repa_encoder_depth is not None
-            else sit_depth - 1
-        )
-
         # 探测 DINO 输出维度
         with torch.inference_mode():
             dummy_rgb  = torch.zeros(
@@ -542,37 +536,47 @@ def main(args):
             dino_dim        = dino_probe.shape[-1]    # 768
             dino_num_tokens = dino_probe.shape[1]     # 256
 
-        logger.info(
-            f"REPA setup:\n"
-            f"  SiT hidden_dim  : {sit_hidden_dim}\n"
-            f"  DINO dim        : {dino_dim}\n"
-            f"  DINO num_tokens : {dino_num_tokens}\n"
-            f"  hook block      : [{hook_layer_idx} / {sit_depth - 1}]\n"
-            f"  projector_type  : {args.projector_type}"
-        )
+        if args.projector_type == "repa":
+            # REPA baseline: 使用模型内置 projector (self.projectors)
+            # 不需要外部 projector 和 hook
+            logger.info(
+                f"REPA setup (internal projector):\n"
+                f"  SiT encoder_depth : {args.repa_encoder_depth}\n"
+                f"  Internal projector: {args.repa_hidden_dim}d, 3-layer SiLU MLP\n"
+                f"  Projector params  : "
+                f"{sum(p.numel() for p in model.projectors.parameters()):,}"
+            )
 
-        grid_size = int(dino_num_tokens ** 0.5)
-        repa_projector = build_projector(
-            projector_type=args.projector_type,
-            in_dim=sit_hidden_dim,
-            out_dim=dino_dim,
-            hidden_dim=args.repa_hidden_dim,
-            grid_size=grid_size,
-        ).to(device)
+        elif args.projector_type == "irepa":
+            # iREPA: 需要外部 Conv projector + hook
+            hook_layer_idx = args.repa_encoder_depth - 1
 
-        logger.info(
-            f"  Projector params: "
-            f"{sum(p.numel() for p in repa_projector.parameters()):,}"
-        )
+            grid_size = int(dino_num_tokens ** 0.5)
+            repa_projector = build_projector(
+                projector_type="irepa",
+                in_dim=sit_hidden_dim,
+                out_dim=dino_dim,
+                grid_size=grid_size,
+            ).to(device)
+
+            logger.info(
+                f"iREPA setup (external Conv projector):\n"
+                f"  hook block       : [{hook_layer_idx} / {sit_depth - 1}]\n"
+                f"  Conv projector   : in={sit_hidden_dim}, out={dino_dim}, k=3\n"
+                f"  Projector params : "
+                f"{sum(p.numel() for p in repa_projector.parameters()):,}"
+            )
 
     # ── DDP wrap ──────────────────────────────────────────────────────────
     model = DDP(model, device_ids=[device])
-    if args.repa:
+    if args.repa and repa_projector is not None:
         repa_projector = DDP(repa_projector, device_ids=[device])
 
     # ── 优化器 ────────────────────────────────────────────────────────────
+    # model.parameters() 已包含 REPA SiT 内置 projector 的参数
     trainable_params = list(model.parameters())
-    if args.repa:
+    if args.repa and repa_projector is not None:
+        # iREPA 外部 Conv projector 的额外参数
         trainable_params += list(repa_projector.parameters())
 
     opt = torch.optim.AdamW(
@@ -629,7 +633,8 @@ def main(args):
     model.train()
     ema.eval()
     if args.repa:
-        repa_projector.train()
+        if repa_projector is not None:
+            repa_projector.train()
         dino_model.eval()
 
     # ── 日志累计变量 ──────────────────────────────────────────────────────
@@ -693,14 +698,13 @@ def main(args):
                     warmup_steps=args.repa_warmup_steps,
                 )
 
-            # ── 注册 forward hook（仅对齐期间） ──────────────────────────
+            # ── 注册 forward hook（仅 iREPA 模式需要，捕获中间 token）──────
             _captured_tokens = {}
             hook_handle      = None
 
-            if args.repa and train_align_weight > 0:
+            if (args.repa and train_align_weight > 0
+                    and args.projector_type == "irepa"):
                 def _hook_fn(module, input, output):
-                    # SiT block output: [B, N_tok, D]
-                    # 保留梯度供 projector 反向传播
                     _captured_tokens['tokens'] = output
 
                 hook_handle = (
@@ -723,7 +727,7 @@ def main(args):
 
             model_kwargs = dict(y=y)
             with autocast("cuda", dtype=mp_dtype, enabled=(args.mixed_precision != "no")):
-                model_output = model(x_t, time_input.flatten(), **model_kwargs)
+                model_output, zs_tilde = model(x_t, time_input.flatten(), **model_kwargs)
                 loss_denoising = mean_flat(
                     (model_output - model_target) ** 2
                 ).mean()
@@ -742,11 +746,7 @@ def main(args):
             avg_diff_weight    = 0.0
             alignment_computed = False
 
-            if (args.repa
-                    and train_align_weight > 0
-                    and 'tokens' in _captured_tokens):
-
-                sit_tokens = _captured_tokens['tokens']    # [B, N_tok, D]
+            if (args.repa and train_align_weight > 0):
 
                 # Teacher tokens（clean RGB → DINOv2）
                 x_dino = preprocess_for_dino(images)
@@ -757,30 +757,52 @@ def main(args):
                 if args.projector_type == "irepa":
                     dino_tokens = spatial_normalize(dino_tokens)
 
-                # Projector：SiT token → DINOv2 特征空间
-                proj_tokens = repa_projector(sit_tokens)    # [B, N_tok, 768]
+                # ── 获取 projected tokens ──────────────────────────────
+                if args.projector_type == "repa":
+                    # REPA baseline: 使用模型内置 projector 的输出 zs_tilde
+                    # zs_tilde 是 list of [bsz, [B, N, z_dim]] tensors
+                    # REPA SILoss 对所有 encoder × batch 求平均
+                    proj_loss = 0.0
+                    bsz = dino_tokens.shape[0]
+                    for z_tilde_per_enc in zs_tilde:    # 遍历每个 encoder
+                        for z_j, z_tilde_j in zip([dino_tokens], z_tilde_per_enc):
+                            z_tilde_j = F.normalize(z_tilde_j, dim=-1)
+                            z_j       = F.normalize(z_j, dim=-1)
+                            # REPA 原版: -cos_sim，但我们统一用 1-cos_sim
+                            cos_sim = (z_j * z_tilde_j).sum(dim=-1)  # [B, N]
+                            proj_loss += mean_flat(1.0 - cos_sim)
+                    proj_loss = proj_loss / (len(zs_tilde) * bsz)
 
-                # Token 数量一致性校验
-                if proj_tokens.shape[1] != dino_tokens.shape[1]:
-                    raise ValueError(
-                        f"Token count mismatch: "
-                        f"proj={proj_tokens.shape}, "
-                        f"dino={dino_tokens.shape}"
-                    )
+                    # 轴 2：扩散时间步加权
+                    weights = get_diff_timestep_weight(t_continuous, args.repa_diff_schedule)
+                    loss_align = (weights * proj_loss).mean()
+                    with torch.no_grad():
+                        avg_diff_weight = weights.mean().item()
 
-                # ── 二维调度的轴 2：扩散时间步加权 ──────────────────────
-                # t=0 干净 → 权重大（cosine 模式），与 REPA baseline (uniform) 对照
-                loss_align = cosine_align_loss_weighted(
-                    pred=proj_tokens,
-                    target=dino_tokens,
-                    t=t_continuous,
-                    diff_schedule=args.repa_diff_schedule,
-                )
-                with torch.no_grad():
-                    w = get_diff_timestep_weight(
-                        t_continuous, args.repa_diff_schedule
-                    )
-                    avg_diff_weight = w.mean().item()
+                elif args.projector_type == "irepa":
+                    # iREPA: 使用外部 Conv projector + hook 捕获的 token
+                    if 'tokens' in _captured_tokens:
+                        sit_tokens  = _captured_tokens['tokens']
+                        proj_tokens = repa_projector(sit_tokens)
+
+                        if proj_tokens.shape[1] != dino_tokens.shape[1]:
+                            raise ValueError(
+                                f"Token count mismatch: "
+                                f"proj={proj_tokens.shape}, "
+                                f"dino={dino_tokens.shape}"
+                            )
+
+                        loss_align = cosine_align_loss_weighted(
+                            pred=proj_tokens,
+                            target=dino_tokens,
+                            t=t_continuous,
+                            diff_schedule=args.repa_diff_schedule,
+                        )
+                        with torch.no_grad():
+                            w = get_diff_timestep_weight(
+                                t_continuous, args.repa_diff_schedule
+                            )
+                            avg_diff_weight = w.mean().item()
 
                 alignment_computed = True
 
@@ -906,7 +928,7 @@ def main(args):
 
     # ── 收尾 ─────────────────────────────────────────────────────────────
     model.eval()
-    if args.repa:
+    if args.repa and repa_projector is not None:
         repa_projector.eval()
 
     logger.info("Done!")
@@ -947,6 +969,22 @@ if __name__ == "__main__":
         "--image-size", type=int, choices=[256, 512], default=256,
     )
     parser.add_argument("--num-classes", type=int, default=1000)
+    parser.add_argument(
+        "--fused-attn", action=argparse.BooleanOptionalAction, default=True,
+        help="启用 fused attention（REPA 默认 True）。",
+    )
+    parser.add_argument(
+        "--qk-norm", action=argparse.BooleanOptionalAction, default=False,
+        help="启用 QK normalization（REPA 默认 False）。",
+    )
+    parser.add_argument(
+        "--cfg-prob", type=float, default=0.1,
+        help="CFG label dropout 概率（REPA 默认 0.1）。",
+    )
+    parser.add_argument(
+        "--z-dim", type=int, default=768,
+        help="DINOv2 encoder embed_dim，用于 SiT 内置 projector 的 z_dims。",
+    )
     parser.add_argument("--epochs",      type=int, default=1400)
     parser.add_argument("--max-steps",   type=int, default=None)
     parser.add_argument("--global-batch-size", type=int, default=256)
