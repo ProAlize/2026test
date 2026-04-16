@@ -466,14 +466,25 @@ def main(args):
         logger         = create_logger(None)
         checkpoint_dir = None
 
-    # ── 创建 SiT 模型 ─────────────────────────────────────────────────────
+    # ── 创建 REPA 版 SiT 模型 ─────────────────────────────────────────────
     assert args.image_size % 8 == 0, "image_size must be divisible by 8."
     latent_size = args.image_size // 8
 
+    # REPA 版 SiT 需要额外参数：
+    #   use_cfg      : 启用 CFG dropout
+    #   z_dims       : encoder embed_dim，用于内置 projector
+    #   encoder_depth: 在第 N 层提取 token 用于对齐
+    #   projector_dim: 内置 3-layer MLP 的隐层维度
+    #   block_kwargs : fused_attn, qk_norm
+    block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        learn_sigma=False,    # REPA 原版: out_channels = in_channels，不学方差
+        use_cfg=(args.cfg_prob > 0),
+        z_dims=[args.z_dim],
+        encoder_depth=args.repa_encoder_depth,
+        projector_dim=args.repa_hidden_dim,
+        **block_kwargs,
     )
     ema = deepcopy(model).to(device)
     requires_grad(ema, False)
@@ -482,7 +493,9 @@ def main(args):
     logger.info(
         f"SiT model      : {args.model}\n"
         f"SiT parameters : {sum(p.numel() for p in model.parameters()):,}\n"
-        f"learn_sigma    : False (match REPA)"
+        f"encoder_depth  : {args.repa_encoder_depth}\n"
+        f"z_dims         : [{args.z_dim}]\n"
+        f"projector_dim  : {args.repa_hidden_dim}"
     )
     if args.max_steps is not None:
         logger.info(f"Training will stop at max_steps = {args.max_steps}")
@@ -760,18 +773,21 @@ def main(args):
                 # ── 获取 projected tokens ──────────────────────────────
                 if args.projector_type == "repa":
                     # REPA baseline: 使用模型内置 projector 的输出 zs_tilde
-                    # zs_tilde 是 list of [bsz, [B, N, z_dim]] tensors
-                    # REPA SILoss 对所有 encoder × batch 求平均
+                    # 与 REPA loss.py SILoss 严格一致的 proj_loss 计算
                     proj_loss = 0.0
                     bsz = dino_tokens.shape[0]
-                    for z_tilde_per_enc in zs_tilde:    # 遍历每个 encoder
-                        for z_j, z_tilde_j in zip([dino_tokens], z_tilde_per_enc):
+                    for i, (z, z_tilde) in enumerate(zip([dino_tokens], zs_tilde)):
+                        for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
                             z_tilde_j = F.normalize(z_tilde_j, dim=-1)
                             z_j       = F.normalize(z_j, dim=-1)
-                            # REPA 原版: -cos_sim，但我们统一用 1-cos_sim
-                            cos_sim = (z_j * z_tilde_j).sum(dim=-1)  # [B, N]
-                            proj_loss += mean_flat(1.0 - cos_sim)
+                            proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
                     proj_loss = proj_loss / (len(zs_tilde) * bsz)
+
+                    # 轴 2：扩散时间步加权（REPA baseline 用 uniform 时等价于无加权）
+                    weights = get_diff_timestep_weight(t_continuous, args.repa_diff_schedule)
+                    loss_align = (weights * proj_loss).mean()
+                    with torch.no_grad():
+                        avg_diff_weight = weights.mean().item()
 
                     # 轴 2：扩散时间步加权
                     weights = get_diff_timestep_weight(t_continuous, args.repa_diff_schedule)
