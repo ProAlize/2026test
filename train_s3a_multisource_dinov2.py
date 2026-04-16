@@ -192,10 +192,25 @@ def get_train_phase_weight(
     current_step: int,
     schedule_steps: int,
     schedule: str = "cosine_decay",
+    warmup_steps: int = 0,
 ) -> float:
-    """Phase-axis weight used in 3D curriculum."""
+    """Phase-axis weight used in 3D curriculum.
+
+    For ``piecewise_linear``:
+        [0, warmup_steps)       → 1.0  (constant full strength)
+        [warmup_steps, schedule_steps) → linear 1.0 → 0.0
+        [schedule_steps, ...)   → 0.0
+    """
     if schedule == "constant":
         return 1.0
+
+    if schedule == "piecewise_linear":
+        if current_step < warmup_steps:
+            return 1.0
+        if current_step >= schedule_steps:
+            return 0.0
+        decay_len = max(1, schedule_steps - warmup_steps)
+        return 1.0 - (current_step - warmup_steps) / decay_len
 
     progress = min(max(current_step / max(1, schedule_steps), 0.0), 1.0)
 
@@ -208,7 +223,7 @@ def get_train_phase_weight(
 
     raise ValueError(
         f"Unknown train schedule: {schedule!r}. "
-        "Choose from: constant, linear_decay, cosine_decay, cutoff."
+        "Choose from: constant, linear_decay, cosine_decay, cutoff, piecewise_linear."
     )
 
 
@@ -1673,6 +1688,7 @@ def _validate_resume_contract(
         "s3a_protect_source0_min_alpha",
         "s3a_train_schedule",
         "s3a_schedule_steps",
+        "s3a_schedule_warmup_steps",
         "s3a_diff_schedule",
         "s3a_layer_weight_mode",
         "s3a_layer_weights",
@@ -1710,6 +1726,7 @@ def _validate_resume_contract(
         "s3a_router_policy_kl_lambda",
         "dinov2_model_variant",
         "s3a_adapter_hidden_dim",
+        "s3a_schedule_warmup_steps",
     }
     backward_compatible_missing_defaults = {
         # For boolean contract flags, require legacy-equivalent default.
@@ -1720,6 +1737,8 @@ def _validate_resume_contract(
         "dinov2_model_variant": "vitb14",
         # Legacy checkpoints stored None (fallback to in_dim); new default is 2048.
         "s3a_adapter_hidden_dim": None,
+        # Legacy checkpoints had no warmup_steps concept (equivalent to 0).
+        "s3a_schedule_warmup_steps": 0,
     }
     mismatches = []
     missing_keys = []
@@ -2342,7 +2361,7 @@ def main(args):
             f"S3A config:\n"
             f"  checkpoint format   : {CHECKPOINT_FORMAT_VERSION}\n"
             f"  metrics schema      : {METRICS_SCHEMA_VERSION}\n"
-            f"  phase schedule     : {args.s3a_train_schedule} over {args.s3a_schedule_steps}\n"
+            f"  phase schedule     : {args.s3a_train_schedule} over {args.s3a_schedule_steps} (warmup={args.s3a_schedule_warmup_steps})\n"
             f"  diff schedule      : {args.s3a_diff_schedule}\n"
             f"  layer indices      : {s3a_layer_indices}\n"
             f"  layer mode         : {args.s3a_layer_weight_mode}\n"
@@ -2473,6 +2492,7 @@ def main(args):
                     current_step=current_step,
                     schedule_steps=args.s3a_schedule_steps,
                     schedule=args.s3a_train_schedule,
+                    warmup_steps=args.s3a_schedule_warmup_steps,
                 )
 
             student_tokens: Dict[str, torch.Tensor] = {}
@@ -3206,7 +3226,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--s3a", action="store_true", help="Enable S3A alignment branch.")
-    parser.add_argument("--s3a-lambda", type=float, default=0.1)
+    parser.add_argument("--s3a-lambda", type=float, default=0.5)
 
     parser.add_argument(
         "--s3a-layer-indices",
@@ -3248,10 +3268,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--s3a-train-schedule",
         type=str,
-        choices=["constant", "linear_decay", "cosine_decay", "cutoff"],
-        default="cosine_decay",
+        choices=["constant", "linear_decay", "cosine_decay", "cutoff", "piecewise_linear"],
+        default="piecewise_linear",
     )
-    parser.add_argument("--s3a-schedule-steps", type=int, default=40_000)
+    parser.add_argument("--s3a-schedule-steps", type=int, default=300_000)
+    parser.add_argument(
+        "--s3a-schedule-warmup-steps",
+        type=int,
+        default=100_000,
+        help=(
+            "Constant-strength phase before decay begins. "
+            "Only used when --s3a-train-schedule=piecewise_linear."
+        ),
+    )
     parser.add_argument(
         "--s3a-diff-schedule",
         type=str,
@@ -3516,6 +3545,16 @@ def validate_args(args):
             )
         if args.s3a_lambda < 0:
             raise ValueError("--s3a-lambda must be >= 0")
+        if args.s3a_schedule_warmup_steps < 0:
+            raise ValueError("--s3a-schedule-warmup-steps must be >= 0")
+        if (
+            args.s3a_train_schedule == "piecewise_linear"
+            and args.s3a_schedule_warmup_steps >= args.s3a_schedule_steps
+        ):
+            raise ValueError(
+                "--s3a-schedule-warmup-steps must be < --s3a-schedule-steps "
+                "when using piecewise_linear schedule."
+            )
         if args.s3a_feat_weight < 0 or args.s3a_attn_weight < 0 or args.s3a_spatial_weight < 0:
             raise ValueError("S3A loss weights must be >= 0")
         if not (0.0 <= args.s3a_dino_alpha_floor < 1.0):
