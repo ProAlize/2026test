@@ -1,0 +1,7 @@
+# Keep only review result docs in this folder.
+*
+!.gitignore
+!*.md
+!0417/
+0417/*
+!0417/*.md

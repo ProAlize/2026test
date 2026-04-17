@@ -153,3 +153,28 @@ What is proved now:
 
 Not proved:
 - Optimization-level dual-source effectiveness/synergy; still empirical.
+
+## 2026-04-17 v3 Multi-Agent Review (`$research-review`)
+
+- Review record:
+  - `/home/liuchunfa/2026qjx/2026test/review/0417/RESEARCH_REVIEW_S3A_V3_MULTIAGENT_20260417.md`
+- Secondary reviewers (`gpt-5.4 xhigh`):
+  - `019d9a8f-cdcc-7b40-ac1f-23ea2162038a`
+  - `019d9a8f-ce16-74a1-a4a7-a2c450e502cf`
+  - `019d9a8f-ceef-7e03-9ad1-e287fefb227d`
+
+Consensus:
+- Contract-level "no exact zero-collapse for source0" still holds.
+- Mechanism-level dual-source collaboration still fails in current v3 controller.
+- Observed regime remains loop-like:
+  - brief dual-open -> self-dominant floor-hug -> alarm/mitigation -> DINO-only reset.
+
+Evidence snapshot:
+- Post-unlock windows: `dual_alive=2/44`, `avg_dual_synergy_margin=-0.3993`, `max_dino_starved_alarm=1`.
+
+Claim gate:
+- Allowed now: guarded anti-collapse engineering claim.
+- Not allowed now: "dual-source collaboration solved" / strong reliability-routing claim.
+
+Immediate next action:
+- Patch controller acceptance/reopen logic with synergy + floor-relative joint criteria, then rerun strict 45k short validation.
