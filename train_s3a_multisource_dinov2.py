@@ -66,12 +66,23 @@ def update_ema(ema_model, model, decay=0.9999):
 
 
 @torch.no_grad()
-def update_ema_adapters(ema_adapters: nn.ModuleDict, student_adapters: nn.ModuleDict, decay: float = 0.999):
-    """EMA-update ema_adapters from student_adapters so the self-source
-    projection tracks the student adapter without sharing the exact same weights."""
-    for key in ema_adapters:
-        ema_params = OrderedDict(ema_adapters[key].named_parameters())
-        src_params = OrderedDict(student_adapters[key].named_parameters())
+def update_ema_adapters(
+    ema_adapters: nn.ModuleDict,
+    student_adapters: nn.ModuleDict,
+    ema_layer_keys: List[str],
+    student_layer_keys: List[str],
+    decay: float = 0.999,
+):
+    """EMA-update ema_adapters from the closest student_adapters."""
+    for ema_key in ema_layer_keys:
+        if ema_key not in ema_adapters:
+            continue
+        closest_student_key = min(
+            student_layer_keys,
+            key=lambda sk: abs(int(sk) - int(ema_key)),
+        )
+        ema_params = OrderedDict(ema_adapters[ema_key].named_parameters())
+        src_params = OrderedDict(student_adapters[closest_student_key].named_parameters())
         for name, param in src_params.items():
             ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
@@ -731,6 +742,8 @@ class S3AAlignmentHead(nn.Module):
         router_hidden_dim: int,
         use_ema_source: bool,
         use_trainable_ema_adapters: bool,
+        depth: int = 28,
+        self_layer_offset: int = 14,
     ):
         super().__init__()
         self.layer_indices = list(layer_indices)
@@ -738,6 +751,24 @@ class S3AAlignmentHead(nn.Module):
         self.use_ema_source = use_ema_source
         self.use_trainable_ema_adapters = bool(use_trainable_ema_adapters and use_ema_source)
         self.num_sources = 2 if use_ema_source else 1  # [dino, self]
+        self.depth = depth
+        self.self_layer_offset = self_layer_offset
+
+        # For each student layer, compute the corresponding EMA teacher layer.
+        # If teacher_layer == student_layer (no room to offset), self-source
+        # is disabled for that slot.
+        self.ema_layer_map: Dict[str, Optional[str]] = {}
+        self._ema_layer_indices: List[int] = []
+        if use_ema_source:
+            for li in self.layer_indices:
+                teacher_li = min(li + self_layer_offset, depth - 1)
+                if teacher_li == li:
+                    self.ema_layer_map[str(li)] = None  # no self-source
+                else:
+                    self.ema_layer_map[str(li)] = str(teacher_li)
+                    self._ema_layer_indices.append(teacher_li)
+            self._ema_layer_indices = sorted(set(self._ema_layer_indices))
+        self.ema_layer_keys = [str(i) for i in self._ema_layer_indices]
 
         self.student_adapters = nn.ModuleDict(
             {
@@ -750,7 +781,7 @@ class S3AAlignmentHead(nn.Module):
             }
         )
 
-        if self.use_ema_source:
+        if self.use_ema_source and self.ema_layer_keys:
             self.ema_adapters = nn.ModuleDict(
                 {
                     k: SpatiallyFaithfulAdapter(
@@ -758,7 +789,7 @@ class S3AAlignmentHead(nn.Module):
                         out_dim=target_dim,
                         hidden_dim=adapter_hidden_dim,
                     )
-                    for k in self.layer_keys
+                    for k in self.ema_layer_keys
                 }
             )
         else:
@@ -1123,28 +1154,26 @@ def compute_s3a_alignment_loss(
         source_ready = torch.ones(s3a_head.num_sources, device=device)
 
         if s3a_head.use_ema_source:
-            if key in ema_tokens:
-                ema_tokens_detached = ema_tokens[key].detach().clone()
+            # Cross-layer lookup: student layer m → EMA teacher layer n (deeper).
+            ema_teacher_key = s3a_head.ema_layer_map.get(key)
+            if ema_teacher_key is not None and ema_teacher_key in ema_tokens:
+                ema_tokens_detached = ema_tokens[ema_teacher_key].detach().clone()
                 if s3a_head.use_trainable_ema_adapters and s3a_head.ema_adapters is not None:
-                    # Trainable self-side projector with gradient.
-                    ema_proj = s3a_head.ema_adapters[key](ema_tokens_detached)
+                    ema_proj = s3a_head.ema_adapters[ema_teacher_key](ema_tokens_detached)
                     ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1])
                 else:
-                    # Use the INDEPENDENT ema_adapters (frozen copy) to project
-                    # EMA tokens.  This avoids the self-alignment shortcut where
-                    # pred ≈ ema_proj trivially because same adapter + similar
-                    # inputs produces near-identical outputs.
-                    if s3a_head.ema_adapters is not None:
+                    if s3a_head.ema_adapters is not None and ema_teacher_key in s3a_head.ema_adapters:
                         with torch.no_grad():
-                            ema_proj = s3a_head.ema_adapters[key](ema_tokens_detached)
+                            ema_proj = s3a_head.ema_adapters[ema_teacher_key](ema_tokens_detached)
                         ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
                     else:
-                        # Fallback: no ema_adapters module exists.
-                        with torch.no_grad():
-                            ema_proj = s3a_head.student_adapters[key](ema_tokens_detached)
-                        ema_proj = resize_tokens_to_match(ema_proj, pred.shape[1]).detach()
-                sources.append(ema_proj)
-                source_ready[1] = 1.0
+                        ema_proj = None
+                if ema_proj is not None:
+                    sources.append(ema_proj)
+                    source_ready[1] = 1.0
+                else:
+                    sources.append(torch.zeros_like(dino_layer))
+                    source_ready[1] = 0.0
             else:
                 sources.append(torch.zeros_like(dino_layer))
                 source_ready[1] = 0.0
@@ -1730,6 +1759,8 @@ def _validate_resume_contract(
         "s3a_lambda",
         "s3a_adapter_hidden_dim",
         "s3a_router_hidden_dim",
+        "s3a_self_layer_offset",
+        "s3a_self_timestep_offset_max",
         "s3a_router_detach_input",
         "s3a_router_policy_kl_lambda",
         "s3a_attn_max_tokens",
@@ -1742,6 +1773,8 @@ def _validate_resume_contract(
         "dinov2_model_variant",
         "s3a_adapter_hidden_dim",
         "s3a_schedule_warmup_steps",
+        "s3a_self_layer_offset",
+        "s3a_self_timestep_offset_max",
     }
     backward_compatible_missing_defaults = {
         # For boolean contract flags, require legacy-equivalent default.
@@ -1754,6 +1787,9 @@ def _validate_resume_contract(
         "s3a_adapter_hidden_dim": None,
         # Legacy checkpoints had no warmup_steps concept (equivalent to 0).
         "s3a_schedule_warmup_steps": 0,
+        # Legacy checkpoints used same-layer same-timestep self-source (offset=0).
+        "s3a_self_layer_offset": 0,
+        "s3a_self_timestep_offset_max": 0,
     }
     mismatches = []
     missing_keys = []
@@ -2163,28 +2199,39 @@ def main(args):
             router_hidden_dim=args.s3a_router_hidden_dim,
             use_ema_source=args.s3a_use_ema_source,
             use_trainable_ema_adapters=args.s3a_trainable_ema_adapters,
+            depth=dit_depth,
+            self_layer_offset=args.s3a_self_layer_offset,
         ).to(device)
 
         logger.info(
             f"S3A setup:\n"
             f"  DiT hidden_dim      : {dit_hidden_dim}\n"
+            f"  DiT depth           : {dit_depth}\n"
             f"  DINO variant        : {args.dinov2_model_variant}\n"
             f"  DINO dim            : {dino_dim}\n"
             f"  DINO num_tokens     : {dino_num_tokens}\n"
             f"  adapter hidden_dim  : {args.s3a_adapter_hidden_dim}\n"
             f"  layer indices       : {s3a_layer_indices}\n"
             f"  layer weights       : {[round(w, 4) for w in s3a_layer_weights]}\n"
+            f"  self layer offset   : {args.s3a_self_layer_offset}\n"
+            f"  ema teacher layers  : {s3a_head._ema_layer_indices}\n"
+            f"  ema layer map       : {dict(s3a_head.ema_layer_map)}\n"
+            f"  self timestep offset: {args.s3a_self_timestep_offset_max}\n"
             f"  trainable ema-adpt  : {args.s3a_trainable_ema_adapters}\n"
             f"  S3A params          : {sum(p.numel() for p in s3a_head.parameters()):,}"
         )
         if not args.s3a_trainable_ema_adapters:
-            # Initialize ema_adapters from student_adapters (identical starting
-            # point) and freeze them.  They will be updated via
-            # update_ema_adapters() after each optimizer step, NOT by backprop.
+            # Initialize ema_adapters from the CLOSEST student_adapter and
+            # freeze them.  Keys differ (teacher layers vs student layers).
             if s3a_head.ema_adapters is not None:
-                for key in s3a_head.student_adapters:
-                    sd = s3a_head.student_adapters[key].state_dict()
-                    s3a_head.ema_adapters[key].load_state_dict(sd)
+                for ema_key in s3a_head.ema_layer_keys:
+                    # Find the closest student adapter to copy from.
+                    closest_student_key = min(
+                        s3a_head.layer_keys,
+                        key=lambda sk: abs(int(sk) - int(ema_key)),
+                    )
+                    sd = s3a_head.student_adapters[closest_student_key].state_dict()
+                    s3a_head.ema_adapters[ema_key].load_state_dict(sd)
             for name, p in s3a_head.named_parameters():
                 if name.startswith("ema_adapters."):
                     p.requires_grad_(False)
@@ -2569,15 +2616,28 @@ def main(args):
                 remove_hooks(student_handles)
 
             # Optional self source from EMA model (frozen).
+            # Cross-layer + cross-timestep: EMA sees deeper layers at lower noise.
             if (
                 args.s3a
                 and phase_weight > 0
                 and args.s3a_use_ema_source
             ):
-                ema_handles = register_block_hooks(ema, s3a_layer_indices, ema_tokens)
-                with torch.inference_mode():
-                    _ = ema(x_t, t, y)
-                remove_hooks(ema_handles)
+                ema_hook_layers = s3a_head.module._ema_layer_indices
+                if ema_hook_layers:
+                    ema_handles = register_block_hooks(ema, ema_hook_layers, ema_tokens)
+                    # Cross-timestep: teacher gets lower noise (t - k)
+                    k = torch.randint(
+                        0,
+                        max(1, args.s3a_self_timestep_offset_max + 1),
+                        (x.shape[0],),
+                        device=device,
+                    )
+                    t_ema = torch.clamp(t - k, min=0)
+                    # Same noise vector, different timestep → same diffusion trajectory
+                    x_t_ema = diffusion.q_sample(x, t_ema, noise=noise)
+                    with torch.inference_mode():
+                        _ = ema(x_t_ema, t_ema, y)
+                    remove_hooks(ema_handles)
 
             loss_align = torch.tensor(0.0, device=device)
             align_stats = make_empty_align_stats(s3a_layer_indices)
@@ -2676,6 +2736,8 @@ def main(args):
                 update_ema_adapters(
                     s3a_head.module.ema_adapters,
                     s3a_head.module.student_adapters,
+                    ema_layer_keys=s3a_head.module.ema_layer_keys,
+                    student_layer_keys=s3a_head.module.layer_keys,
                 )
 
             running_loss += loss.item()
@@ -3305,6 +3367,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--s3a-router-hidden-dim", type=int, default=256)
+    parser.add_argument(
+        "--s3a-self-layer-offset",
+        type=int,
+        default=14,
+        help=(
+            "Layer offset for self-source: EMA teacher uses layer "
+            "min(student_layer + offset, depth-1). Default 14 for DiT-XL/2."
+        ),
+    )
+    parser.add_argument(
+        "--s3a-self-timestep-offset-max",
+        type=int,
+        default=200,
+        help=(
+            "Max timestep offset k for self-source. EMA teacher processes "
+            "t_ema = max(0, t - k) where k ~ Uniform(0, this). Default 200."
+        ),
+    )
     parser.add_argument(
         "--s3a-router-detach-input",
         action=argparse.BooleanOptionalAction,
