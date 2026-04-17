@@ -1,0 +1,178 @@
+[2026-04-16 19:31:26] status=WARN reason=no_metric_line_yet log=monitor_logs/s3a_bz128_400k_v4.log
+
+[2026-04-16 19:51:26] status=WARN reason=insufficient_history claim_gate=inconclusive step=0000500 loss=0.9831 loss_diff=0.2191 loss_align=1.5280 trend20=insufficient a_dino=1.000 a_dino_above_floor=0.902 alpha_dino_min_layer_above_floor=0.902 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.82 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 99, 43085, 49140;1, 100, 43085, 49140;2, 97, 43085, 49140;3, 95, 43085, 49140 
+
+[2026-04-16 20:11:26] status=WARN reason=insufficient_history claim_gate=inconclusive step=0001500 loss=0.9023 loss_diff=0.1782 loss_align=1.4483 trend20=insufficient a_dino=1.000 a_dino_above_floor=0.906 alpha_dino_min_layer_above_floor=0.906 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 95, 43085, 49140;2, 97, 43085, 49140;3, 95, 43085, 49140 
+
+[2026-04-16 20:31:26] status=WARN reason=insufficient_history claim_gate=inconclusive step=0002500 loss=0.8757 loss_diff=0.1715 loss_align=1.4084 trend20=insufficient a_dino=1.000 a_dino_above_floor=0.910 alpha_dino_min_layer_above_floor=0.910 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 97, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 20:51:27] status=HEALTHY reason=stable claim_gate=monitoring step=0003500 loss=0.8614 loss_diff=0.1711 loss_align=1.3805 trend20=down a_dino=1.000 a_dino_above_floor=0.914 alpha_dino_min_layer_above_floor=0.914 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 21:11:27] status=HEALTHY reason=stable claim_gate=monitoring step=0004500 loss=0.8516 loss_diff=0.1706 loss_align=1.3621 trend20=down a_dino=1.000 a_dino_above_floor=0.918 alpha_dino_min_layer_above_floor=0.918 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 99, 43085, 49140;2, 100, 43085, 49140;3, 97, 43085, 49140 
+
+[2026-04-16 21:31:27] status=HEALTHY reason=stable claim_gate=monitoring step=0005500 loss=0.8432 loss_diff=0.1679 loss_align=1.3507 trend20=down a_dino=1.000 a_dino_above_floor=0.922 alpha_dino_min_layer_above_floor=0.922 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 95, 43085, 49140;2, 95, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 21:51:27] status=HEALTHY reason=stable claim_gate=monitoring step=0006500 loss=0.8365 loss_diff=0.1652 loss_align=1.3427 trend20=down a_dino=1.000 a_dino_above_floor=0.926 alpha_dino_min_layer_above_floor=0.926 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 98, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 97, 43085, 49140 
+
+[2026-04-16 22:11:28] status=HEALTHY reason=stable claim_gate=monitoring step=0007500 loss=0.8350 loss_diff=0.1668 loss_align=1.3366 trend20=down a_dino=1.000 a_dino_above_floor=0.930 alpha_dino_min_layer_above_floor=0.930 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 95, 43085, 49140;1, 98, 43085, 49140;2, 97, 43085, 49140;3, 95, 43085, 49140 
+
+[2026-04-16 22:31:28] status=HEALTHY reason=stable claim_gate=monitoring step=0008500 loss=0.8320 loss_diff=0.1662 loss_align=1.3317 trend20=down a_dino=1.000 a_dino_above_floor=0.934 alpha_dino_min_layer_above_floor=0.934 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 88, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 22:51:28] status=HEALTHY reason=stable claim_gate=monitoring step=0009500 loss=0.8270 loss_diff=0.1629 loss_align=1.3282 trend20=down a_dino=1.000 a_dino_above_floor=0.938 alpha_dino_min_layer_above_floor=0.938 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 96, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 23:11:28] status=HEALTHY reason=stable claim_gate=monitoring step=0010500 loss=0.8260 loss_diff=0.1644 loss_align=1.3232 trend20=down a_dino=1.000 a_dino_above_floor=0.942 alpha_dino_min_layer_above_floor=0.942 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 98, 43085, 49140;1, 72, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 23:31:29] status=HEALTHY reason=stable claim_gate=monitoring step=0011500 loss=0.8221 loss_diff=0.1606 loss_align=1.3229 trend20=down a_dino=1.000 a_dino_above_floor=0.946 alpha_dino_min_layer_above_floor=0.946 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 99, 43085, 49140;1, 99, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-16 23:51:29] status=HEALTHY reason=stable claim_gate=monitoring step=0012500 loss=0.8226 loss_diff=0.1625 loss_align=1.3201 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 78, 43085, 49140;1, 99, 43085, 49140;2, 97, 43085, 49140;3, 98, 43085, 49140 
+
+[2026-04-17 00:11:29] status=HEALTHY reason=stable claim_gate=monitoring step=0013500 loss=0.8221 loss_diff=0.1623 loss_align=1.3196 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 81, 43085, 49140;1, 97, 43085, 49140;2, 97, 43085, 49140;3, 98, 43085, 49140 
+
+[2026-04-17 00:31:30] status=HEALTHY reason=stable claim_gate=monitoring step=0014500 loss=0.8211 loss_diff=0.1622 loss_align=1.3179 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 95, 43085, 49140;1, 84, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-17 00:51:30] status=HEALTHY reason=stable claim_gate=monitoring step=0015500 loss=0.8205 loss_diff=0.1625 loss_align=1.3159 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-17 01:11:30] status=HEALTHY reason=stable claim_gate=monitoring step=0016000 loss=0.8200 loss_diff=0.1616 loss_align=1.3168 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 100, 43085, 49140;2, 95, 43085, 49140;3, 96, 43085, 49140 
+
+[2026-04-17 01:31:30] status=HEALTHY reason=stable claim_gate=monitoring step=0017000 loss=0.8174 loss_diff=0.1603 loss_align=1.3141 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 96, 43085, 49140;1, 71, 43085, 49140;2, 74, 43085, 49140;3, 100, 43085, 49140 
+
+[2026-04-17 01:51:31] status=HEALTHY reason=stable claim_gate=monitoring step=0018000 loss=0.8150 loss_diff=0.1576 loss_align=1.3148 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 93, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 98, 43085, 49140 
+
+[2026-04-17 02:11:31] status=HEALTHY reason=stable claim_gate=monitoring step=0019000 loss=0.8167 loss_diff=0.1595 loss_align=1.3143 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  gpu_snapshot=0, 100, 43085, 49140;1, 100, 43085, 49140;2, 100, 43085, 49140;3, 75, 43085, 49140 
+
+[2026-04-17 02:31:31] status=HEALTHY reason=stable claim_gate=monitoring step=0020000 loss=0.8166 loss_diff=0.1600 loss_align=1.3131 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 99, 43087, 49140;1, 100, 43087, 49140;2, 100, 43087, 49140;3, 97, 43087, 49140 
+
+[2026-04-17 02:51:32] status=HEALTHY reason=stable claim_gate=monitoring step=0021000 loss=0.8136 loss_diff=0.1584 loss_align=1.3105 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 97, 43087, 49140;1, 99, 43087, 49140;2, 100, 43087, 49140;3, 100, 43087, 49140 
+
+[2026-04-17 03:11:32] status=HEALTHY reason=stable claim_gate=monitoring step=0022000 loss=0.8136 loss_diff=0.1573 loss_align=1.3126 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43087, 49140;1, 97, 43087, 49140;2, 100, 43087, 49140;3, 80, 43087, 49140 
+
+[2026-04-17 03:31:32] status=HEALTHY reason=stable claim_gate=monitoring step=0023000 loss=0.8148 loss_diff=0.1590 loss_align=1.3116 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 97, 43087, 49140;1, 97, 43087, 49140;2, 98, 43087, 49140;3, 100, 43087, 49140 
+
+[2026-04-17 03:51:32] status=HEALTHY reason=stable claim_gate=monitoring step=0024000 loss=0.8160 loss_diff=0.1609 loss_align=1.3102 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 99, 43087, 49140;1, 93, 43087, 49140;2, 100, 43087, 49140;3, 98, 43087, 49140 
+
+[2026-04-17 04:11:33] status=HEALTHY reason=stable claim_gate=monitoring step=0025000 loss=0.8132 loss_diff=0.1573 loss_align=1.3119 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.81 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 97, 43091, 49140;1, 99, 43091, 49140;2, 100, 43091, 49140;3, 97, 43091, 49140 
+
+[2026-04-17 04:31:33] status=HEALTHY reason=stable claim_gate=monitoring step=0026000 loss=0.1966 loss_diff=0.1590 loss_align=0.0754 trend20=down a_dino=0.136 a_dino_above_floor=0.086 alpha_dino_min_layer_above_floor=0.086 a_self=0.864 mask_self=1.000 gate_self=1.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=1 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 98, 43091, 49140;2, 98, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 04:51:33] status=HEALTHY reason=stable claim_gate=monitoring step=0027000 loss=0.1714 loss_diff=0.1576 loss_align=0.0276 trend20=down a_dino=0.050 a_dino_above_floor=0.000 alpha_dino_min_layer_above_floor=0.000 a_self=0.950 mask_self=1.000 gate_self=1.000 dino_starved=1 any_layer_dino_starved=1 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=1 dual_not_alive_rounds=1
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 98, 43091, 49140;1, 100, 43091, 49140;2, 96, 43091, 49140;3, 98, 43091, 49140 
+
+[2026-04-17 05:11:33] status=HEALTHY reason=stable claim_gate=monitoring step=0028000 loss=0.4629 loss_diff=0.1588 loss_align=0.6082 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 97, 43091, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 05:31:34] status=HEALTHY reason=stable claim_gate=monitoring step=0029000 loss=0.4155 loss_diff=0.1580 loss_align=0.5149 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 97, 43091, 49140;2, 98, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 05:51:34] status=HEALTHY reason=stable claim_gate=monitoring step=0029500 loss=0.4147 loss_diff=0.1576 loss_align=0.5141 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.618 gate_self=0.618 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 06:11:34] status=HEALTHY reason=stable claim_gate=monitoring step=0030500 loss=0.4130 loss_diff=0.1576 loss_align=0.5108 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.782 gate_self=0.782 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.79 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 93, 43091, 49140;2, 93, 43091, 49140;3, 97, 43091, 49140 
+
+[2026-04-17 06:31:34] status=HEALTHY reason=stable claim_gate=monitoring step=0031500 loss=0.4125 loss_diff=0.1576 loss_align=0.5098 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.600 gate_self=0.600 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 97, 43091, 49140;2, 97, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 06:51:35] status=HEALTHY reason=stable claim_gate=monitoring step=0032500 loss=0.4113 loss_diff=0.1575 loss_align=0.5077 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.982 gate_self=0.982 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 65, 43091, 49140;2, 91, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 07:11:35] status=HEALTHY reason=stable claim_gate=monitoring step=0033500 loss=0.4105 loss_diff=0.1565 loss_align=0.5080 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.600 gate_self=0.600 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 07:31:35] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0034500 loss=0.4091 loss_diff=0.1555 loss_align=0.5071 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.818 gate_self=0.818 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 90, 43091, 49140 
+
+[2026-04-17 07:51:36] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0035500 loss=0.4109 loss_diff=0.1576 loss_align=0.5066 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.600 gate_self=0.600 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 97, 43091, 49140;1, 100, 43091, 49140;2, 98, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 08:11:36] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0036500 loss=0.4085 loss_diff=0.1559 loss_align=0.5051 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.618 gate_self=0.618 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 87, 43091, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 99, 43091, 49140 
+
+[2026-04-17 08:31:36] status=HEALTHY reason=stable claim_gate=monitoring step=0037500 loss=0.1722 loss_diff=0.1550 loss_align=0.0344 trend20=down a_dino=0.050 a_dino_above_floor=0.000 alpha_dino_min_layer_above_floor=0.000 a_self=0.950 mask_self=1.000 gate_self=1.000 dino_starved=1 any_layer_dino_starved=1 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=1 dual_not_alive_rounds=1
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 98, 43091, 49140;1, 95, 43091, 49140;2, 98, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 08:51:36] status=CRITICAL reason=trainer_dino_starved_alarm claim_gate=no step=0038500 loss=0.1716 loss_diff=0.1549 loss_align=0.0334 trend20=down a_dino=0.050 a_dino_above_floor=0.000 alpha_dino_min_layer_above_floor=0.000 a_self=0.950 mask_self=1.000 gate_self=1.000 dino_starved=1 any_layer_dino_starved=1 dino_starved_alarm=1 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=2 dual_not_alive_rounds=2
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 98, 43091, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 97, 43091, 49140 
+
+[2026-04-17 09:11:37] status=HEALTHY reason=stable claim_gate=monitoring step=0039500 loss=0.4094 loss_diff=0.1565 loss_align=0.5059 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0020000.pt
+  gpu_snapshot=0, 59, 43091, 49140;1, 100, 43091, 49140;2, 80, 43091, 49140;3, 95, 43091, 49140 
+
+[2026-04-17 09:31:37] status=HEALTHY reason=stable claim_gate=monitoring step=0040000 loss=0.4088 loss_diff=0.1560 loss_align=0.5056 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.000 gate_self=0.000 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 100, 43091, 49140;1, 95, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 09:51:37] status=HEALTHY reason=stable claim_gate=monitoring step=0041000 loss=0.4093 loss_diff=0.1582 loss_align=0.5022 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.600 gate_self=0.600 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 63, 43093, 49140;1, 83, 43091, 49140;2, 97, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 10:11:37] status=HEALTHY reason=stable claim_gate=monitoring step=0042000 loss=0.4067 loss_diff=0.1554 loss_align=0.5025 trend20=down a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.818 gate_self=0.818 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 100, 43093, 49140;1, 94, 43091, 49140;2, 95, 43091, 49140;3, 99, 43091, 49140 
+
+[2026-04-17 10:31:38] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0043000 loss=0.4078 loss_diff=0.1582 loss_align=0.4992 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.600 gate_self=0.600 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 100, 43093, 49140;1, 100, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 10:51:38] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0044000 loss=0.4048 loss_diff=0.1544 loss_align=0.5008 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.618 gate_self=0.618 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 57, 43093, 49140;1, 62, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 11:11:38] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0045000 loss=0.4049 loss_diff=0.1557 loss_align=0.4984 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.782 gate_self=0.782 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 100, 43093, 49140;1, 100, 43091, 49140;2, 98, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 11:31:39] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0046000 loss=0.4059 loss_diff=0.1570 loss_align=0.4979 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.600 gate_self=0.600 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 100, 43093, 49140;1, 97, 43091, 49140;2, 100, 43091, 49140;3, 100, 43091, 49140 
+
+[2026-04-17 11:51:39] status=WARN reason=recent_loss_trending_up claim_gate=inconclusive step=0047000 loss=0.4044 loss_diff=0.1560 loss_align=0.4969 trend20=up a_dino=1.000 a_dino_above_floor=0.950 alpha_dino_min_layer_above_floor=0.950 a_self=0.000 mask_self=0.982 gate_self=0.982 dino_starved=0 any_layer_dino_starved=0 dino_starved_alarm=0 collapse_alarm=0 dual_alive=0 steps_per_s=0.80 stale_rounds=0 dino_starve_rounds=0 dual_not_alive_rounds=0
+  last_checkpoint=/data/liuchunfa/2026qjx/s3a_runs/dit_xl_s3a_dinov2_400k_bz128_20260416/DiT-XL-2-seed0-20260416-193137-945ecf-s3a-dinov2-lam0.5-trainpiecewise_cosine-diffcosine/checkpoints/0040000.pt
+  gpu_snapshot=0, 100, 43093, 49140;1, 100, 43091, 49140;2, 97, 43091, 49140;3, 97, 43091, 49140 
+
