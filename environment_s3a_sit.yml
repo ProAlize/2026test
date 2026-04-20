@@ -1,0 +1,35 @@
+# Conda environment for S3A-SiT (SiT-XL/2 + S3A alignment with DINOv2).
+# Usage: conda env create -f environment_s3a_sit.yml
+#        conda activate s3a-sit
+#
+# Tested on: CUDA 11.8 / 12.1, Python 3.10, PyTorch 2.1+
+# Note: The SiT repo (willisma/SiT) must be cloned separately.
+#       See SETUP_S3A_SIT.md for full instructions.
+name: s3a-sit
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch>=2.1.0
+  - torchvision>=0.16.0
+  - torchaudio>=2.1.0
+  - pytorch-cuda=12.1
+  - numpy
+  - pillow
+  - pip
+  - pip:
+    # Diffusers (VAE decoder)
+    - diffusers>=0.24.0
+    - accelerate>=0.25.0
+    # DINOv2 dependencies
+    - timm>=0.9.0
+    # SiT transport framework (installed from local clone)
+    # - See SETUP_S3A_SIT.md step 2
+    # Metrics / evaluation
+    - scipy
+    - scikit-learn
+    # Utilities
+    - tqdm
