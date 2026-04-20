@@ -107,6 +107,26 @@ Router 对 256 个 token 做 GAP 后用 256-d MLP 决策，输出 per-sample per
 
 ---
 
-## B2: DINO Floor 安全机制 — 待讨论
+## B2: DINO Floor 0.05 — 结论：保留，ablation only
+
+### 现状
+
+两层 DINO 下限：
+- 衰减 floor: `--s3a-dino-alpha-floor=0.1`，0→25k 步线性衰减到 0
+- 永久 floor: `--s3a-protect-source0-min-alpha=0.05`，全程 α_dino ≥ 0.05
+
+### 不修改的理由
+
+1. **Floor 从未被触发**：训练中 a_dino ≈ 0.287，远高于 0.05，floor 是非活跃安全网
+2. **双源都有等效保护**：DINO 用 alpha floor，self 用 collapse alarm + auto-mitigation，对称设计
+3. **首次训练不动安全网**：在 400k FID 出来之前，不知道 floor 是否在某阶段悄悄救场
+4. **代价可量化**：最坏情况 `0.05 × L_dino`，在 effective_lambda cosine decay 后期可忽略
+5. **移除应作为 ablation**：论文消融表可跑 "S3A w/o DINO floor" 对照
+
+### 状态：✅ Closed, keep as safety net
+
+---
+
+## B3: EMA Layer 27 重复 — 待讨论
 
 （见下次讨论）
