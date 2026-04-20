@@ -85,3 +85,28 @@ iREPA 的两个改动：
 
 旧 checkpoint 无法 strict load 到新 adapter（参数名变化：spatial_dw → spatial_conv + spatial_act）。
 需要从头训练或 --allow-legacy-resume-args。
+
+---
+
+## A2: Router GAP — 结论：by design, 不修改
+
+### 诊断
+
+Router 对 256 个 token 做 GAP 后用 256-d MLP 决策，输出 per-sample per-layer 的标量权重 [α_dino, α_self]。
+审计时标记为"丢失空间信息"，但经分析认为这是**正确的归纳偏置**。
+
+### 不修改的理由
+
+1. **Router 的职能是宏观调度**：回答"这层/这个噪声水平用多少 DINO"，不需要空间细节
+2. **训练 metrics 确认 router 工作正常**：dual_alive=100%，entropy 健康，alpha 非均匀分配
+3. **空间细粒度已由 adapter 负责**：bottleneck Conv 做 per-token 空间建模，和 router 的 per-layer 调度分工明确
+4. **per-token routing 改动量过大**：alpha floor、policy KL、utility probe、collapse detection 全部需要 per-token 化，训练成本显著增加，收益不确定
+5. **GAP 防止 router 过拟合**：只看全局统计量，避免 router 学到与 adapter 重叠的局部 pattern
+
+### 状态：✅ Closed, by design
+
+---
+
+## B2: DINO Floor 安全机制 — 待讨论
+
+（见下次讨论）
