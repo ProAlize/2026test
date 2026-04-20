@@ -2601,7 +2601,6 @@ def main(args):
             images = images.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             current_step = train_steps
-            batches_seen += 1
 
             with torch.no_grad():
                 x = vae.encode(images).latent_dist.sample().mul_(0.18215)
@@ -2828,6 +2827,7 @@ def main(args):
 
             log_steps += 1
             train_steps += 1
+            batches_seen += 1
 
             if train_steps == 1 and rank == 0:
                 logger.info(f"  [step=1] images shape : {images.shape}")
