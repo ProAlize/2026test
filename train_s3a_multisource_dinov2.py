@@ -642,9 +642,32 @@ def preprocess_for_dino(x: torch.Tensor) -> torch.Tensor:
 
 
 class SpatiallyFaithfulAdapter(nn.Module):
-    """Token MLP path + depthwise spatial path."""
+    """Token MLP path + bottleneck Conv spatial path.
 
-    def __init__(self, in_dim: int, out_dim: int, hidden_dim: Optional[int] = None):
+    Token path: Linear → GELU → Linear (channel projection, no spatial).
+    Spatial path: Linear(in→bottleneck) → Conv2d(3×3, full channel mix)
+                  → GELU → Linear(bottleneck→out).
+
+    The bottleneck Conv uses standard (non-depthwise) convolution so that
+    channels mix spatially — critical for transferring spatial structure
+    (validated by iREPA, ICLR 2026).
+
+    Args:
+        in_dim:       Student hidden dimension (e.g. 1152 for XL).
+        out_dim:      Target dimension (e.g. 768 for DINOv2 ViT-B/14).
+        hidden_dim:   Token MLP hidden dimension (default: in_dim).
+        spatial_bottleneck_dim: Conv bottleneck width (default: 256).
+                      Full Conv2d(B, B, 3×3) has B² × 9 params.
+                      256 → 590K; 128 → 147K; 512 → 2.36M.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        hidden_dim: Optional[int] = None,
+        spatial_bottleneck_dim: int = 256,
+    ):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = in_dim
@@ -657,16 +680,16 @@ class SpatiallyFaithfulAdapter(nn.Module):
             nn.Linear(hidden_dim, out_dim),
         )
 
-        self.spatial_in = nn.Linear(in_dim, hidden_dim)
-        self.spatial_dw = nn.Conv2d(
-            hidden_dim,
-            hidden_dim,
+        self.spatial_in = nn.Linear(in_dim, spatial_bottleneck_dim)
+        self.spatial_conv = nn.Conv2d(
+            spatial_bottleneck_dim,
+            spatial_bottleneck_dim,
             kernel_size=3,
             stride=1,
             padding=1,
-            groups=hidden_dim,
         )
-        self.spatial_out = nn.Linear(hidden_dim, out_dim)
+        self.spatial_act = nn.GELU()
+        self.spatial_out = nn.Linear(spatial_bottleneck_dim, out_dim)
         self.out_norm = nn.LayerNorm(out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -680,7 +703,8 @@ class SpatiallyFaithfulAdapter(nn.Module):
 
         spatial = self.spatial_in(x_norm)
         spatial = spatial.transpose(1, 2).reshape(x.shape[0], -1, side, side)
-        spatial = self.spatial_dw(spatial)
+        spatial = self.spatial_conv(spatial)
+        spatial = self.spatial_act(spatial)
         spatial = spatial.reshape(x.shape[0], -1, x.shape[1]).transpose(1, 2)
         spatial = self.spatial_out(spatial)
 
@@ -744,6 +768,7 @@ class S3AAlignmentHead(nn.Module):
         use_trainable_ema_adapters: bool,
         depth: int = 28,
         self_layer_offset: int = 14,
+        spatial_bottleneck_dim: int = 256,
     ):
         super().__init__()
         self.layer_indices = list(layer_indices)
@@ -776,6 +801,7 @@ class S3AAlignmentHead(nn.Module):
                     in_dim=student_dim,
                     out_dim=target_dim,
                     hidden_dim=adapter_hidden_dim,
+                    spatial_bottleneck_dim=spatial_bottleneck_dim,
                 )
                 for k in self.layer_keys
             }
@@ -788,6 +814,7 @@ class S3AAlignmentHead(nn.Module):
                         in_dim=student_dim,
                         out_dim=target_dim,
                         hidden_dim=adapter_hidden_dim,
+                        spatial_bottleneck_dim=spatial_bottleneck_dim,
                     )
                     for k in self.ema_layer_keys
                 }
@@ -1149,6 +1176,15 @@ def compute_s3a_alignment_loss(
         # DINO features are extracted under inference_mode; clone to a normal
         # tensor so autograd ops (e.g., fused weighted sum) can save intermediates.
         dino_layer = resize_tokens_to_match(dino_tokens, pred.shape[1]).detach().clone()
+
+        # Spatial normalization on DINO target: remove per-sample global mean
+        # so that cosine/affinity losses focus on spatial *structure* rather
+        # than global semantics.  Validated by iREPA (ICLR 2026) as critical
+        # for alignment effectiveness.
+        if getattr(args, "s3a_spatial_norm_target", True):
+            dino_mean = dino_layer.mean(dim=1, keepdim=True)  # [B, 1, C]
+            dino_layer = dino_layer - dino_mean
+
         sources = [dino_layer]
 
         source_ready = torch.ones(s3a_head.num_sources, device=device)
@@ -1758,6 +1794,8 @@ def _validate_resume_contract(
         "s3a_layer_indices",
         "s3a_lambda",
         "s3a_adapter_hidden_dim",
+        "s3a_spatial_bottleneck_dim",
+        "s3a_spatial_norm_target",
         "s3a_router_hidden_dim",
         "s3a_self_layer_offset",
         "s3a_self_timestep_offset_max",
@@ -1772,6 +1810,8 @@ def _validate_resume_contract(
         "s3a_router_policy_kl_lambda",
         "dinov2_model_variant",
         "s3a_adapter_hidden_dim",
+        "s3a_spatial_bottleneck_dim",
+        "s3a_spatial_norm_target",
         "s3a_schedule_warmup_steps",
         "s3a_self_layer_offset",
         "s3a_self_timestep_offset_max",
@@ -1785,6 +1825,10 @@ def _validate_resume_contract(
         "dinov2_model_variant": "vitb14",
         # Legacy checkpoints stored None (fallback to in_dim); new default is 2048.
         "s3a_adapter_hidden_dim": None,
+        # Legacy checkpoints used DWConv (no spatial bottleneck concept).
+        "s3a_spatial_bottleneck_dim": None,
+        # Legacy checkpoints did not apply spatial norm on target.
+        "s3a_spatial_norm_target": False,
         # Legacy checkpoints had no warmup_steps concept (equivalent to 0).
         "s3a_schedule_warmup_steps": 0,
         # Legacy checkpoints used same-layer same-timestep self-source (offset=0).
@@ -2201,6 +2245,7 @@ def main(args):
             use_trainable_ema_adapters=args.s3a_trainable_ema_adapters,
             depth=dit_depth,
             self_layer_offset=args.s3a_self_layer_offset,
+            spatial_bottleneck_dim=args.s3a_spatial_bottleneck_dim,
         ).to(device)
 
         logger.info(
@@ -2211,6 +2256,7 @@ def main(args):
             f"  DINO dim            : {dino_dim}\n"
             f"  DINO num_tokens     : {dino_num_tokens}\n"
             f"  adapter hidden_dim  : {args.s3a_adapter_hidden_dim}\n"
+            f"  spatial bottleneck  : {args.s3a_spatial_bottleneck_dim}\n"
             f"  layer indices       : {s3a_layer_indices}\n"
             f"  layer weights       : {[round(w, 4) for w in s3a_layer_weights]}\n"
             f"  self layer offset   : {args.s3a_self_layer_offset}\n"
@@ -3361,9 +3407,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2048,
         help=(
-            "Hidden dimension for SpatiallyFaithfulAdapter. "
+            "Hidden dimension for SpatiallyFaithfulAdapter token MLP path. "
             "Default 2048 matches REPA projector width. "
             "Pass 0 to use in_dim (legacy behaviour, needed for resuming old checkpoints)."
+        ),
+    )
+    parser.add_argument(
+        "--s3a-spatial-bottleneck-dim",
+        type=int,
+        default=256,
+        help=(
+            "Bottleneck dimension for the spatial Conv2d path in "
+            "SpatiallyFaithfulAdapter. Uses full (non-depthwise) Conv2d "
+            "for cross-channel spatial mixing. Default 256 (590K params/layer). "
+            "Set 0 to disable spatial path entirely."
+        ),
+    )
+    parser.add_argument(
+        "--s3a-spatial-norm-target",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply spatial normalization (subtract per-sample mean) to DINO "
+            "target tokens before alignment. Removes global semantic component "
+            "so loss focuses on spatial structure (iREPA, ICLR 2026)."
         ),
     )
     parser.add_argument("--s3a-router-hidden-dim", type=int, default=256)
