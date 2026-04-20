@@ -1194,7 +1194,9 @@ def compute_s3a_alignment_loss(
         layer_slot_tensor = torch.full(
             (pred.shape[0],), slot, device=device, dtype=torch.long
         )
-        t_norm = t.float() / max(T - 1, 1)
+        # SiT: t is already continuous in [0, 1] (flipped to REPA convention).
+        # No need to divide by T-1 as in the DiT version.
+        t_norm = t.float()
         phase_norm_tensor = torch.full_like(t_norm, fill_value=phase_norm)
         router_tokens = s_tokens.detach() if args.s3a_router_detach_input else s_tokens
 
@@ -1732,6 +1734,10 @@ def _validate_resume_contract(
         "global_seed",
         "num_workers",
         "vae_model_dir",
+        # SiT transport parameters (must match for consistent training).
+        "path_type",
+        "prediction",
+        # DINOv2/S3A parameters.
         "dinov2_weight_path",
         "dinov2_model_variant",
         "s3a",
@@ -3794,6 +3800,19 @@ def validate_args(args):
         if args.s3a_gate_reopen_probe_alpha_floor > 0 and not args.s3a_use_ema_source:
             raise ValueError(
                 "--s3a-gate-reopen-probe-alpha-floor requires --s3a-use-ema-source"
+            )
+        # SiT-specific: EMA cross-timestep uses hardcoded linear interpolation.
+        # Non-linear transport paths (GVP, VP) would cause data distribution
+        # mismatch between student and EMA teacher.
+        if (
+            args.s3a_use_ema_source
+            and hasattr(args, "path_type")
+            and args.path_type != "linear"
+        ):
+            raise ValueError(
+                "S3A with EMA self-source currently requires --path-type linear. "
+                f"Got --path-type={args.path_type}. Non-linear transport paths cause "
+                "data distribution mismatch in cross-timestep EMA forward pass."
             )
         max_source0_floor = args.s3a_protect_source0_min_alpha
         if args.s3a_dino_alpha_floor > 0 and args.s3a_dino_alpha_floor_steps > 0:

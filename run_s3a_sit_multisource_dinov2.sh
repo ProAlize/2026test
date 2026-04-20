@@ -17,6 +17,11 @@ DINOV2_REPO_DIR="${DINOV2_REPO_DIR:-/mnt/tidal-alsh01/dataset/redaigc/yuantiansh
 DINOV2_WEIGHT_PATH="${DINOV2_WEIGHT_PATH:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/tmp/dinov2_weights/dinov2_vitb14_pretrain.pth}"
 DINOV2_MODEL_VARIANT="${DINOV2_MODEL_VARIANT:-vitb14}"
 
+# ── SiT repository (external dependency) ────────────────────────────────
+# SiT models.py and transport/ must be importable.
+# Clone from https://github.com/willisma/SiT if not present.
+SIT_REPO_DIR="${SIT_REPO_DIR:-/mnt/tidal-alsh01/dataset/redaigc/yuantianshuo/tmp/SiT}"
+
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 GLOBAL_SEED="${GLOBAL_SEED:-0}"
@@ -93,11 +98,17 @@ for required_path in \
     "$VAE_MODEL_DIR" \
     "$DINOV2_REPO_DIR" \
     "$DINOV2_REPO_DIR/hubconf.py" \
-    "$DINOV2_WEIGHT_PATH"; do
+    "$DINOV2_WEIGHT_PATH" \
+    "$SIT_REPO_DIR" \
+    "$SIT_REPO_DIR/transport"; do
     if [[ ! -e "$required_path" ]]; then
         echo "[ERROR] Required path not found: $required_path" >&2; exit 1
     fi
 done
+
+# SiT repo must be on PYTHONPATH so `from models import SiT_models` resolves
+# to the SiT repo instead of the workspace's DiT models.py.
+export PYTHONPATH="${SIT_REPO_DIR}:${PYTHONPATH:-}"
 
 mkdir -p "$RESULTS_DIR"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -128,6 +139,7 @@ echo "DINO alpha min   : $S3A_PROTECT_SOURCE0_MIN_ALPHA"
 echo "DINOv2 repo      : $DINOV2_REPO_DIR"
 echo "DINOv2 weight    : $DINOV2_WEIGHT_PATH"
 echo "DINOv2 variant   : $DINOV2_MODEL_VARIANT"
+echo "SiT repo         : $SIT_REPO_DIR"
 echo "VAE              : $VAE_MODEL_DIR"
 [[ -n "$RESUME_CKPT" ]] && echo "Resume checkpoint: $RESUME_CKPT"
 echo "=================================================="
