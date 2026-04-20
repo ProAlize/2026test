@@ -2143,7 +2143,9 @@ def main(args):
     requires_grad(ema, False)
     model = model.to(device)
 
-    # SiT transport framework (replaces DDPM diffusion).
+    # SiT transport framework.  Retained for potential sampling use;
+    # training loss is computed manually below to share noise between
+    # student and EMA (cross-timestep trajectory consistency).
     transport = create_transport(
         path_type=args.path_type,
         prediction=args.prediction,
@@ -2151,7 +2153,8 @@ def main(args):
         train_eps=args.train_eps,
         sample_eps=args.sample_eps,
     )
-    # SiT uses continuous time; T is kept as a sentinel for interface compat.
+    # T is a no-op sentinel; SiT uses continuous time [0, 1].
+    # Only passed through interfaces that still carry the T parameter.
     T = 1000
 
     if args.vae_model_dir is not None:
@@ -2625,32 +2628,60 @@ def main(args):
             student_handles = []
             ema_handles = []
 
+            # ── Pre-generate noise (shared student ↔ EMA) ─────────────
+            # Critical for cross-timestep self-source: student and EMA
+            # must lie on the SAME diffusion trajectory (same noise vector,
+            # different timestep).  Using transport.training_losses() would
+            # hide the noise inside the framework, breaking this invariant.
+            # We therefore compute the linear-path transport loss manually.
+            noise = torch.randn_like(x)
+
+            # Sample continuous time t ~ U(train_eps, 1.0)
+            _train_eps = args.train_eps if args.train_eps is not None else 0.0
+            t_continuous = (
+                torch.rand(x.shape[0], device=device)
+                * (1.0 - _train_eps)
+                + _train_eps
+            )  # SiT convention: t=0 pure noise, t=1 clean data
+
+            # Linear interpolation: x_t = (1-t)*noise + t*clean
+            _t4d = t_continuous.view(-1, 1, 1, 1)
+            x_t = (1.0 - _t4d) * noise + _t4d * x
+
+            # ── Student forward (hooks capture intermediate tokens) ────
             if args.s3a and phase_weight > 0:
                 student_handles = register_block_hooks(
                     model.module, s3a_layer_indices, student_tokens
                 )
 
-            # SiT transport: internally samples t ~ Uniform, creates x_t,
-            # runs model forward, returns loss dict with "loss" and "t".
-            # x1 = clean latent (SiT convention: data endpoint).
             model_kwargs = dict(y=y)
-            loss_dict = transport.training_losses(model, x, model_kwargs)
-            loss_diff = loss_dict["loss"].mean()
-
-            # Continuous time from transport (t=0 noise, t=1 clean in SiT).
-            # Flip to REPA convention (0=clean, 1=noise) for S3A weighting.
-            t_continuous = loss_dict.get("t", None)
-            if t_continuous is not None:
-                t_for_s3a = 1.0 - t_continuous  # 0=clean, 1=noise
-            else:
-                t_for_s3a = torch.zeros(x.shape[0], device=device)
+            # Explicit single forward — hook timing is guaranteed.
+            model_output = model(x_t, t_continuous, **model_kwargs)
 
             if student_handles:
                 remove_hooks(student_handles)
 
-            # Optional self source from EMA model (frozen).
-            # Cross-layer + cross-timestep: EMA sees deeper layers at cleaner data.
-            # SiT convention: t=0 noise, t=1 clean. Push towards clean end.
+            # ── Transport loss (manual, linear path) ──────────────────
+            # velocity target: v = x1 - x0 = clean - noise
+            if args.prediction == "v":
+                _target = x - noise
+            elif args.prediction == "noise":
+                _target = noise
+            elif args.prediction == "x":
+                _target = x
+            else:
+                raise ValueError(f"Unknown --prediction: {args.prediction}")
+            loss_diff = (
+                (model_output - _target)
+                .pow(2)
+                .mean(dim=list(range(1, model_output.ndim)))
+                .mean()
+            )
+
+            # Flip to REPA convention (0=clean, 1=noise) for S3A weighting.
+            t_for_s3a = 1.0 - t_continuous
+
+            # ── EMA forward (SAME noise → same trajectory) ────────────
             if (
                 args.s3a
                 and phase_weight > 0
@@ -2659,20 +2690,18 @@ def main(args):
                 ema_hook_layers = s3a_head.module._ema_layer_indices
                 if ema_hook_layers:
                     ema_handles = register_block_hooks(ema, ema_hook_layers, ema_tokens)
-                    # Cross-timestep: teacher gets cleaner input (t + k towards 1.0)
-                    # SiT: t=1 is clean, so t_ema > t means "more data, less noise"
-                    if t_continuous is not None:
-                        k_norm = torch.rand(
-                            x.shape[0], device=device
-                        ) * (args.s3a_self_timestep_offset_max / max(T - 1, 1))
-                        t_ema_sit = torch.clamp(t_continuous + k_norm, max=1.0)
-                    else:
-                        t_ema_sit = torch.ones(x.shape[0], device=device) * 0.5
+                    # Cross-timestep: push EMA towards clean end (t + k).
+                    # offset_max is in DDPM-discrete units (default 200);
+                    # convert to continuous fraction: 200 / 1000 = 0.2.
+                    _k_max_frac = args.s3a_self_timestep_offset_max / 1000.0
+                    k_frac = torch.rand(
+                        x.shape[0], device=device
+                    ) * _k_max_frac
+                    t_ema_sit = torch.clamp(t_continuous + k_frac, max=1.0)
 
-                    # Construct x_t_ema via linear interpolation (SiT default path).
-                    # x_t = (1-t)*x0 + t*x1 where x0~N(0,I), x1=clean data
-                    noise_ema = torch.randn_like(x)
-                    x_t_ema = (1.0 - t_ema_sit.view(-1, 1, 1, 1)) * noise_ema + t_ema_sit.view(-1, 1, 1, 1) * x
+                    # Same noise, different timestep → same trajectory.
+                    _t_ema_4d = t_ema_sit.view(-1, 1, 1, 1)
+                    x_t_ema = (1.0 - _t_ema_4d) * noise + _t_ema_4d * x
                     with torch.inference_mode():
                         _ = ema(x_t_ema, t_ema_sit, y)
                     remove_hooks(ema_handles)
@@ -3708,6 +3737,17 @@ def validate_args(args):
 
     if args.vae_model_dir is not None and not os.path.isdir(args.vae_model_dir):
         raise FileNotFoundError(f"--vae-model-dir not found: {args.vae_model_dir}")
+
+    # S3A-SiT computes the transport loss manually (for noise sharing with EMA).
+    # Only uniform loss weight is supported; velocity/likelihood would need
+    # the full transport framework which hides noise internally.
+    if args.loss_weight is not None:
+        raise ValueError(
+            "S3A-SiT manual transport only supports --loss-weight=None (uniform). "
+            f"Got --loss-weight={args.loss_weight}. "
+            "Non-uniform loss weighting requires transport.training_losses() "
+            "which prevents noise sharing with EMA self-source."
+        )
 
     if args.s3a:
         if not os.path.isdir(args.dinov2_repo_dir):
